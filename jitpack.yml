@@ -1,0 +1,6 @@
+jdk:
+  - openjdk11
+before_install:
+  - cd tlatools/org.lamport.tlatools
+install:
+  - ant -f customBuild.xml clean compile compile-test dist
