@@ -266,4 +266,53 @@ public class TableauNodePtrTableTest {
 		tbl.put(fingerprint, 1, 2342);
 		assertTrue(tbl.getLoc(fingerprint, 1) != -1);
 	}
+
+	private static int countByLoc(final TableauNodePtrTable tbl) {
+		int n = 0;
+		for (int ci = 0; ci < tbl.getSize(); ci++) {
+			if (tbl.getNodesByLoc(ci) != null) {
+				n++;
+			}
+		}
+		return n;
+	}
+
+	// Lookups grow the table if it reached its threshold. Iterating the table by
+	// location (as LiveWorker#checkComponent does) while looking up nodes would
+	// then miss nodes, and concurrent readers would corrupt the table.
+	@Test
+	public void testLookupsDoNotGrowAfterPrepareForReads() {
+		final TableauNodePtrTable tbl = new TableauNodePtrTable(128);
+		// 96 == thresh of a table with 128 buckets.
+		final int keys = 96;
+		for (long k = 1; k <= keys; k++) {
+			tbl.put(k * 31, 0, k);
+		}
+		tbl.prepareForReads();
+		final int size = tbl.getSize();
+		final int[][] snapshot = new int[size][];
+		for (int ci = 0; ci < size; ci++) {
+			snapshot[ci] = tbl.getNodesByLoc(ci);
+		}
+		for (long k = 1; k <= keys; k++) {
+			assertTrue(tbl.getLoc(k * 31, 0) != -1);
+			assertEquals(k, tbl.get(k * 31, 0));
+			assertTrue(tbl.getNodes(k * 31) != null);
+		}
+		assertEquals(-1, tbl.getLoc(4711L, 0));
+		assertEquals(size, tbl.getSize());
+		for (int ci = 0; ci < size; ci++) {
+			assertTrue(snapshot[ci] == tbl.getNodesByLoc(ci));
+		}
+		assertEquals(keys, countByLoc(tbl));
+	}
+
+	@Test
+	public void testPrepareForReadsNoopBelowThreshold() {
+		final TableauNodePtrTable tbl = new TableauNodePtrTable(128);
+		tbl.put(1L, 0, 1L);
+		tbl.prepareForReads();
+		assertEquals(128, tbl.getSize());
+		assertEquals(1, countByLoc(tbl));
+	}
 }

@@ -330,6 +330,12 @@ Defines which fingerprint set implementation to use. For better many-core perfor
 `tlc2.tool.ModelChecker.BAQueue`
 If run with `-Dtlc2.tool.ModelChecker.BAQueue=true`, TLC will use the `ByteArrayQueue`, a prototype implementation that increases many-core throughput by reducing the critical section of the queue of unseen states.
 
+`tlc2.tool.liveness.LiveCheck.scc` (experimental)
+Selects how liveness checking processes the strongly connected components (SCCs) of the behavior graph. `tarjan` (the default) finds and checks the SCCs in a single thread per property. With `-Dtlc2.tool.liveness.LiveCheck.scc=pipeline`, a single thread still finds the SCCs with Tarjan's algorithm, but a pool of threads checks them concurrently; very large SCCs are split across all threads. The pipeline reports the same violation and counterexample as `tarjan`. `-lncheck seq` implies `tarjan`.
+
+`tlc2.tool.liveness.LiveCheck.sccWorkers`
+The number of threads that check SCCs with `-Dtlc2.tool.liveness.LiveCheck.scc=pipeline`. Defaults to the number of TLC workers (`-workers`).
+
 
 ## TLATEX
 ### Bugs
