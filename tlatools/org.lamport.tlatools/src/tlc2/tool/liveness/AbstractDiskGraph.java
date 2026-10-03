@@ -80,6 +80,7 @@ public abstract class AbstractDiskGraph {
 	}
 
 	private final String chkptName;
+	private final File nodeFile;
 	protected final String metadir;
 	/**
 	 * @see tlatools/test/tlc2/tool/liveness/AbstractDiskGraph.JPG
@@ -100,8 +101,8 @@ public abstract class AbstractDiskGraph {
 		this.metadir = metadir;
 		this.outDegreeGraphStats = graphStats;
 		this.chkptName = metadir + FileUtil.separator + "dgraph_" + soln;
-		String fnameForNodes = metadir + FileUtil.separator + "nodes_" + soln;
-		this.nodeRAF = new BufferedRandomAccessFile(fnameForNodes, "rw");
+		this.nodeFile = new File(metadir + FileUtil.separator + "nodes_" + soln);
+		this.nodeRAF = new BufferedRandomAccessFile(this.nodeFile, "rw");
 		String fnameForPtrs = metadir + FileUtil.separator + "ptrs_" + soln;
 		this.nodePtrRAF = new BufferedRandomAccessFile(fnameForPtrs, "rw");
 		this.initNodes = new LongVec(1);
@@ -251,6 +252,50 @@ public abstract class AbstractDiskGraph {
 	}
 
 	public abstract long getPtr(long l, int tidx);
+
+	/**
+	 * Reads {@link GraphNode}s from this graph through its own file handle so
+	 * that multiple threads can read nodes concurrently (each thread with its
+	 * own reader). Nodes added to the graph after the reader has been created
+	 * might not be visible to the reader.
+	 * <p>
+	 * A {@link NodeReader} is not thread-safe and does not use the in-memory
+	 * cache of {@link AbstractDiskGraph#getNode(long, int, long)}.
+	 */
+	public final class NodeReader implements AutoCloseable {
+		private final BufferedRandomAccessFile raf;
+
+		private NodeReader(final BufferedRandomAccessFile raf) {
+			this.raf = raf;
+		}
+
+		public GraphNode read(final long stateFP, final int tidx, final long ptr) throws IOException {
+			if (ptr < 0) {
+				throw new IllegalArgumentException("Invalid negative file pointer: " + ptr);
+			}
+			this.raf.seek(ptr);
+			final GraphNode gnode = new GraphNode(stateFP, tidx);
+			gnode.read(this.raf);
+			return gnode;
+		}
+
+		@Override
+		public void close() throws IOException {
+			this.raf.close();
+		}
+	}
+
+	/**
+	 * @see NodeReader
+	 */
+	public final NodeReader newNodeReader() throws IOException {
+		synchronized (this) {
+			// Make nodes still in the write buffer visible to the new file handle.
+			this.nodeRAF.flush();
+		}
+		return new NodeReader(new BufferedRandomAccessFile(this.nodeFile, "r"));
+	}
+
 
 	/* Create the in-memory node-pointer table from the node-pointer file. */
 	public final void makeNodePtrTbl() throws IOException {
