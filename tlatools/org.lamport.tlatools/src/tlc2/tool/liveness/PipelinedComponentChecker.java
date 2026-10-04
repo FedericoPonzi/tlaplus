@@ -272,7 +272,7 @@ final class PipelinedComponentChecker implements AutoCloseable {
 			} catch (InterruptedException e) {
 				Thread.currentThread().interrupt();
 				return;
-			} catch (ExecutionException ignored) {
+			} catch (ExecutionException | CancellationException ignored) {
 				// Superseded by the earlier violation or exception.
 			}
 		}
