@@ -331,10 +331,10 @@ Defines which fingerprint set implementation to use. For better many-core perfor
 If run with `-Dtlc2.tool.ModelChecker.BAQueue=true`, TLC will use the `ByteArrayQueue`, a prototype implementation that increases many-core throughput by reducing the critical section of the queue of unseen states.
 
 `tlc2.tool.liveness.LiveCheck.scc` (experimental)
-Selects how liveness checking processes the strongly connected components (SCCs) of the behavior graph. `tarjan` (the default) finds and checks the SCCs in a single thread per property. With `-Dtlc2.tool.liveness.LiveCheck.scc=pipeline`, a single thread still finds the SCCs with Tarjan's algorithm, but a pool of threads checks them concurrently; very large SCCs are split across all threads. The pipeline reports the same violation and counterexample as `tarjan`. `-lncheck seq` implies `tarjan`.
+Selects how liveness checking processes the strongly connected components (SCCs) of the behavior graph. `tarjan` (the default) finds and checks the SCCs in a single thread per property. With `-Dtlc2.tool.liveness.LiveCheck.scc=pipeline`, a single thread still finds the SCCs with Tarjan's algorithm, but a pool of threads checks them concurrently; very large SCCs are split across all threads. The pipeline reports the same violation and counterexample as `tarjan`. With `-Dtlc2.tool.liveness.LiveCheck.scc=ufscc`, up to 64 threads search the SCCs concurrently with the union-find algorithm of [Bloemen et al.](https://github.com/utwente-fmt/ppopp16) and check each SCC as soon as it is complete. `ufscc` reports a violation iff `tarjan` does, but its counterexample may differ from that of `tarjan` and between runs. `-lncheck seq` implies `tarjan`.
 
 `tlc2.tool.liveness.LiveCheck.sccWorkers`
-The number of threads that check SCCs with `-Dtlc2.tool.liveness.LiveCheck.scc=pipeline`. Defaults to the number of TLC workers (`-workers`).
+The number of threads that check SCCs with `-Dtlc2.tool.liveness.LiveCheck.scc=pipeline` or search them with `-Dtlc2.tool.liveness.LiveCheck.scc=ufscc`. Defaults to the number of TLC workers (`-workers`).
 
 
 ## TLATEX
