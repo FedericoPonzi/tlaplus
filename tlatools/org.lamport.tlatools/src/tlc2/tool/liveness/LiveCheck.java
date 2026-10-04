@@ -307,7 +307,7 @@ public class LiveCheck implements ILiveCheck {
 			pool.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS); // wait forever
 		} finally {
 			if (sccPool != null) {
-				sccPool.shutdownNow();
+				shutdownNow(sccPool);
 			}
 		}
 
@@ -352,6 +352,16 @@ public class LiveCheck implements ILiveCheck {
 		return EC.NO_ERROR;
 	}
 	
+	// shutdownNow drops queued tasks without completing them; cancel them so
+	// LiveWorkers blocked in Future#get do not hang.
+	static void shutdownNow(final ExecutorService pool) {
+		for (final Runnable r : pool.shutdownNow()) {
+			if (r instanceof Future) {
+				((Future<?>) r).cancel(false);
+			}
+		}
+	}
+
 	/* (non-Javadoc)
 	 * @see tlc2.tool.liveness.ILiveCheck#checkTrace(tlc2.tool.StateVec)
 	 */
