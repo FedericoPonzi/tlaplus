@@ -342,6 +342,12 @@ public abstract class AbstractDiskGraph {
 	public abstract long getLink(long state, int tidx);
 
 	/**
+	 * Makes {@link #getLink(long, int)} safe to call concurrently until the
+	 * graph is modified again.
+	 */
+	public abstract void prepareForReads();
+
+	/**
 	 * Assign link to node during SCC search. If a link has already been
 	 * assigned to the node, does nothing by simply returning the existing link.
 	 * Otherwise, add &lt;node, link&gt; into the table and return -1. The link

@@ -71,6 +71,19 @@ public class SccStrategyTest {
 	}
 
 	@Test
+	public void testUfscc() {
+		System.setProperty(SccStrategy.PROPERTY, "ufscc");
+		assertEquals(SccStrategy.UFSCC, SccStrategy.current());
+	}
+
+	@Test
+	public void testSequentialLivenessForcesTarjanOverUfscc() {
+		System.setProperty(SccStrategy.PROPERTY, "ufscc");
+		TLCGlobals.lnCheck = "seq";
+		assertEquals(SccStrategy.TARJAN, SccStrategy.current());
+	}
+
+	@Test
 	public void testCaseAndWhitespaceInsensitive() {
 		System.setProperty(SccStrategy.PROPERTY, " PipeLine ");
 		assertEquals(SccStrategy.PIPELINE, SccStrategy.current());

@@ -65,6 +65,7 @@ public class LiveWorker implements Callable<Boolean> {
 	 * Non-null iff SCCs are checked by {@link SccStrategy#PIPELINE}.
 	 */
 	private PipelinedComponentChecker pipeline = null;
+	private final SccStrategy sccStrategy;
 	private final ExecutorService sccPool;
 	private final int sccWorkers;
 	private final ILiveCheck liveCheck;
@@ -80,15 +81,16 @@ public class LiveWorker implements Callable<Boolean> {
 	private final int id;
 
 	public LiveWorker(final ITool tool, int id, int numWorkers, final ILiveCheck liveCheck, final BlockingQueue<ILiveChecker> queue, final boolean finalCheck) {
-		this(tool, id, numWorkers, liveCheck, queue, finalCheck, null, 0);
+		this(tool, id, numWorkers, liveCheck, queue, finalCheck, SccStrategy.TARJAN, null, 0);
 	}
 
 	/**
-	 * @param sccPool If non-null, the threads with which SCCs are checked (see
-	 *                {@link SccStrategy#PIPELINE}).
+	 * @param sccPool The threads with which SCCs are searched or checked unless
+	 *                sccStrategy is {@link SccStrategy#TARJAN}.
 	 */
 	public LiveWorker(final ITool tool, int id, int numWorkers, final ILiveCheck liveCheck, final BlockingQueue<ILiveChecker> queue, final boolean finalCheck,
-			final ExecutorService sccPool, final int sccWorkers) {
+			final SccStrategy sccStrategy, final ExecutorService sccPool, final int sccWorkers) {
+		this.sccStrategy = sccStrategy;
 		this.sccPool = sccPool;
 		this.sccWorkers = sccWorkers;
 		this.id = id;
@@ -1175,8 +1177,15 @@ public class LiveWorker implements Callable<Boolean> {
 				if (!hasErrFound()) {
 					this.pem = pems[i];
 					this.checker = new ComponentChecker(this.oos, this.pem);
-					if (this.sccPool == null) {
+					if (this.sccStrategy == SccStrategy.TARJAN) {
 						this.checkSccs(tool);
+					} else if (this.sccStrategy == SccStrategy.UFSCC) {
+						final UnionFindComponentChecker.CounterExample bad = UnionFindComponentChecker.check(
+								this.sccPool, this.sccWorkers, this.dg, this.checker, this.oos, this.pem,
+								this.isFinalCheck);
+						if (bad != null && setErrFound()) {
+							this.printTrace(tool, bad.state, bad.tidx, bad.com);
+						}
 					} else {
 						try (PipelinedComponentChecker p = new PipelinedComponentChecker(this.sccPool,
 								this.sccWorkers, this.checker, this.dg)) {

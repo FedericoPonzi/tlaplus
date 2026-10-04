@@ -47,7 +47,14 @@ public enum SccStrategy {
 	 * continues. Large SCCs are split among the threads. The counterexample
 	 * reported is the same one {@link #TARJAN} reports.
 	 */
-	PIPELINE;
+	PIPELINE,
+	/**
+	 * Concurrent SCC search by {@link #workers()} threads (at most 64) using a
+	 * shared union-find (UFSCC, Bloemen et al., PPoPP 2016). Each SCC is checked
+	 * by the thread that completes it. The counterexample reported may differ
+	 * from the one {@link #TARJAN} reports and between runs.
+	 */
+	UFSCC;
 
 	public static final String PROPERTY = LiveCheck.class.getName() + ".scc";
 

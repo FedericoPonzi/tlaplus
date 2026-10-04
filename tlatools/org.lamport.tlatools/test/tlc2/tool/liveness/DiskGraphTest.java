@@ -169,6 +169,38 @@ public class DiskGraphTest {
 		}
 	}
 
+	@Test
+	public void testGetLinkConcurrentlyAfterPrepareForReads() throws Exception {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		// Fill the node ptr table up to its threshold, at which the next
+		// (unsynchronized) getLink would grow it.
+		final int n = (int) (255 * 0.75);
+		final long[] ptrs = addChain(dg, tidx, n);
+		dg.prepareForReads();
+
+		final int threads = 4;
+		final java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+		try {
+			final java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+			for (int t = 0; t < threads; t++) {
+				futures.add(pool.submit(() -> {
+					for (int k = 0; k < 100; k++) {
+						for (int i = 0; i < n; i++) {
+							assertEquals(ptrs[i], dg.getLink(i + 1L, tidx));
+						}
+					}
+					return null;
+				}));
+			}
+			for (java.util.concurrent.Future<?> f : futures) {
+				f.get();
+			}
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
 	// No init node makes DiskGraph#getPath never break from the while loop
 	@Test
 	public void testGetPathWithoutInitNoTableau() throws IOException {

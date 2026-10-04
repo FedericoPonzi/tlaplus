@@ -175,6 +175,11 @@ public class TableauDiskGraph extends AbstractDiskGraph {
 		return this.nodePtrTbl.get(state, tidx);
 	}
 
+	@Override
+	public void prepareForReads() {
+		this.nodePtrTbl.prepareForReads();
+	}
+
 	/* (non-Javadoc)
 	 * @see tlc2.tool.liveness.AbstractDiskGraph#putLink(long, int, long)
 	 */
