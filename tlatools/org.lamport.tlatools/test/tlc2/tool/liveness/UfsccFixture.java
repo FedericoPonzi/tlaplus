@@ -25,10 +25,12 @@ package tlc2.tool.liveness;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import tla2sany.semantic.ExprNode;
 import tlc2.TLCGlobals;
 import tlc2.output.EC;
 import tlc2.tool.Action;
@@ -64,7 +66,8 @@ final class UfsccFixture {
 	/**
 	 * Asserts that the counterexample is a behavior of the spec: It starts in an
 	 * initial state, each step is a step of the next-state relation, and it
-	 * either ends in stuttering or loops back to one of its states.
+	 * either ends in stuttering or loops back to one of its states. Also, the
+	 * lasso is fair and violates the property.
 	 */
 	static void assertValidLasso(final TestMPRecorder recorder) {
 		assertTrue(recorder.recorded(EC.TLC_COUNTER_EXAMPLE));
@@ -88,12 +91,28 @@ final class UfsccFixture {
 		final boolean stutters = recorder.recorded(EC.TLC_STATE_PRINT3);
 		final boolean loops = recorder.recorded(EC.TLC_BACK_TO_STATE);
 		assertTrue("Counterexample neither stutters nor loops", stutters ^ loops);
+		int cyclePos = trace.length - 1;
 		if (loops) {
 			final Object[] loop = (Object[]) recorder.getRecords(EC.TLC_BACK_TO_STATE).get(0);
 			final int back = Integer.parseInt((String) loop[0]);
 			assertTrue("Loops back to state " + back + " of " + trace.length, 1 <= back && back <= trace.length);
 			assertStep(tool, trace[trace.length - 1], trace[back - 1], trace.length);
+			cyclePos = back - 1;
 		}
+		assertViolates(tool, trace, cyclePos);
+	}
+
+	// Evaluates the spec's fairness and the properties on the exact lasso,
+	// independently of the SCC search.
+	private static void assertViolates(final ITool tool, final TLCState[] trace, final int cyclePos) {
+		final List<TLCState> states = Arrays.asList(trace);
+		boolean fair = true;
+		for (final Action fairness : tool.getTemporals()) {
+			fair &= Liveness.astToLive(tool, (ExprNode) fairness.pred, fairness.con).evalOnLasso(tool, states,
+					cyclePos, 0);
+		}
+		assertTrue("Lasso is unfair or satisfies the property",
+				fair && !Liveness.findViolatedProperties(tool, states, cyclePos).isEmpty());
 	}
 
 	private static void assertStep(final ITool tool, final TLCState from, final TLCState to, final int num) {

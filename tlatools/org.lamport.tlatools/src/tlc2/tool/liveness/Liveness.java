@@ -137,7 +137,7 @@ public class Liveness implements ToolGlobals, ASTConstants {
 	 * the predicate body with []p. For the moment, we require that arguments to
 	 * predicates be computable from its context.
 	 */
-	private static LiveExprNode astToLive(ITool tool, ExprNode expr, Context con) {
+	static LiveExprNode astToLive(ITool tool, ExprNode expr, Context con) {
 		switch (expr.getKind()) {
 		case OpApplKind: {
 			OpApplNode expr1 = (OpApplNode) expr;
