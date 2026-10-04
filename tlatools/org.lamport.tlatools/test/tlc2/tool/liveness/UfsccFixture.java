@@ -54,13 +54,18 @@ final class UfsccFixture {
 	static void enable() {
 		System.setProperty(SccStrategy.PROPERTY, "ufscc");
 		System.setProperty(SccStrategy.WORKERS_PROPERTY, "4");
+		// Split all SCCs across the workers.
+		System.setProperty(PipelinedComponentChecker.SPLIT_PROPERTY, "1");
 		UnionFindComponentChecker.SEARCHES.set(0);
+		UnionFindComponentChecker.SPLITS.set(0);
 	}
 
 	static void assertUfsccUsed() {
 		assertTrue("No SCC search by UFSCC", UnionFindComponentChecker.SEARCHES.get() > 0);
+		assertTrue("No SCC split across workers", UnionFindComponentChecker.SPLITS.get() > 0);
 		System.clearProperty(SccStrategy.PROPERTY);
 		System.clearProperty(SccStrategy.WORKERS_PROPERTY);
+		System.clearProperty(PipelinedComponentChecker.SPLIT_PROPERTY);
 	}
 
 	/**

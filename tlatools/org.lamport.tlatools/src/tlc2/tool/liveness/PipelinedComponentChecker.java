@@ -308,7 +308,7 @@ final class PipelinedComponentChecker implements AutoCloseable {
 		});
 	}
 
-	private static <T> T get(final Future<T> f) throws IOException, InterruptedException {
+	static <T> T get(final Future<T> f) throws IOException, InterruptedException {
 		try {
 			return f.get();
 		} catch (ExecutionException e) {

@@ -28,8 +28,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -45,6 +49,7 @@ final class UnionFindComponentChecker {
 
 	// For tests to assert UFSCC was used.
 	static final AtomicLong SEARCHES = new AtomicLong();
+	static final AtomicLong SPLITS = new AtomicLong();
 
 	/** An SCC that violates liveness, for LiveWorker#printTrace. */
 	static final class CounterExample {
@@ -65,7 +70,11 @@ final class UnionFindComponentChecker {
 	private final int slen;
 	private final int alen;
 	private final boolean isFinalCheck;
+	private final int splitSize;
 	private final Map<Thread, AbstractDiskGraph.NodeReader> readers = new ConcurrentHashMap<>();
+	// Checking a large SCC in the worker that completes it would serialize the
+	// check, thus all workers check them once the search is done.
+	private final Queue<TableauNodePtrTable> deferred = new ConcurrentLinkedQueue<>();
 	private final AtomicReference<TableauNodePtrTable> bad = new AtomicReference<>();
 
 	private UnionFindComponentChecker(final AbstractDiskGraph dg, final ComponentChecker checker,
@@ -76,6 +85,7 @@ final class UnionFindComponentChecker {
 		this.slen = oos.getCheckState().length;
 		this.alen = oos.getCheckAction().length;
 		this.isFinalCheck = isFinalCheck;
+		this.splitSize = Math.max(1, Integer.getInteger(PipelinedComponentChecker.SPLIT_PROPERTY, 1 << 16));
 	}
 
 	/**
@@ -117,8 +127,40 @@ final class UnionFindComponentChecker {
 		} finally {
 			closeReaders();
 		}
-		final TableauNodePtrTable com = this.bad.get();
+		TableauNodePtrTable com = this.bad.get();
+		for (final TableauNodePtrTable d : this.deferred) {
+			if (com != null) {
+				break;
+			}
+			if (checkSplit(pool, workers, d)) {
+				com = d;
+			}
+		}
 		return com == null ? null : entry(com);
+	}
+
+	private boolean checkSplit(final ExecutorService pool, final int workers, final TableauNodePtrTable com)
+			throws IOException, InterruptedException {
+		SPLITS.incrementAndGet();
+		final int size = com.getSize();
+		final List<Callable<ComponentChecker.Result>> chunks = new ArrayList<>(workers);
+		for (int i = 0; i < workers; i++) {
+			final int from = (int) ((long) size * i / workers);
+			final int to = (int) ((long) size * (i + 1) / workers);
+			chunks.add(() -> {
+				// Not reader(): a chunk may outlive an interrupted invokeAll.
+				try (AbstractDiskGraph.NodeReader reader = this.dg.newNodeReader()) {
+					final ComponentChecker.Result res = this.checker.newResult();
+					this.checker.check(com, from, to, reader::read, res);
+					return res;
+				}
+			});
+		}
+		final ComponentChecker.Result res = this.checker.newResult();
+		for (final Future<ComponentChecker.Result> f : pool.invokeAll(chunks)) {
+			res.or(PipelinedComponentChecker.get(f));
+		}
+		return res.isCounterExample();
 	}
 
 	/**
@@ -203,6 +245,10 @@ final class UnionFindComponentChecker {
 			com.put(n.fp, n.tidx, n.ptr);
 		}
 		com.prepareForReads();
+		if (scc.size() >= this.splitSize) {
+			this.deferred.add(com);
+			return false;
+		}
 		final ComponentChecker.Result res = this.checker.newResult();
 		this.checker.check(com, 0, com.getSize(), reader::read, res);
 		if (!res.isCounterExample()) {
