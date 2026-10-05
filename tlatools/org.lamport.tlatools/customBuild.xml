@@ -1037,6 +1037,10 @@
 			<sysproperty key="util.FileUtil.milliseconds" value="true"/>
 			<sysproperty key="tlc2.tool.distributed.TLCWorker.threadCount" value="4"/>
 			<sysproperty key="tlc2.overrides.TLCOverrides" value="tlc2.overrides.TLCOverrides${path.separator}tlc2.overrides.TLCTestOverrides"/>
+			<!-- Forward e.g. -Dtlc2.tool.liveness.LiveCheck.scc=pipeline to rerun the tests with it. -->
+			<syspropertyset>
+				<propertyref prefix="tlc2.tool.liveness."/>
+			</syspropertyset>
 
 			<!-- Print all output of the test to the screen. -->
 			<formatter type="plain" usefile="false" />
