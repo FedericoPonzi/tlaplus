@@ -101,6 +101,7 @@ public class DiskGraph extends AbstractDiskGraph {
 		if (!isFilePointer(oldLink)) {
 			return oldLink;
 		}
+		markNodePtrTblStale();
 		this.nodePtrTbl.putByLoc(state, link, loc);
 		return -1;
 	}
@@ -109,6 +110,7 @@ public class DiskGraph extends AbstractDiskGraph {
 	 * @see tlc2.tool.liveness.DiskGraph#setMaxLink(long, int)
 	 */
 	public void setMaxLink(long state, int tidx) {
+		markNodePtrTblStale();
 		this.nodePtrTbl.put(state, MAX_LINK);
 	}
 
@@ -243,6 +245,8 @@ public class DiskGraph extends AbstractDiskGraph {
 
 		// Restore the nodePtrTbl:
 		this.makeNodePtrTbl();
+		// The search below marks the nodes in nodePtrTbl.
+		markNodePtrTblStale();
 
 		// Do breath-first search:
 		final long offset = MAX_PTR + 1;

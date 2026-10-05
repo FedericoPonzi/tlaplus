@@ -201,6 +201,44 @@ public class DiskGraphTest {
 		}
 	}
 
+	// The SCC search overwrites the file pointers in the node ptr table with
+	// links, which makeNodePtrTblIfStale has to undo. Without links, it must
+	// not re-read the (potentially huge) ptr file.
+	@Test
+	public void testMakeNodePtrTblIfStale() throws IOException {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		final long[] ptrs = addChain(dg, tidx, 3);
+		assertFalse(dg.isNodePtrTblStale());
+
+		dg.putLink(1L, tidx, AbstractDiskGraph.MAX_PTR + 1);
+		dg.setMaxLink(2L, tidx);
+		assertTrue(dg.isNodePtrTblStale());
+
+		dg.makeNodePtrTblIfStale();
+		assertFalse(dg.isNodePtrTblStale());
+		for (int i = 0; i < ptrs.length; i++) {
+			assertEquals(ptrs[i], dg.getLink(i + 1L, tidx));
+		}
+	}
+
+	// DiskGraph#getPath marks nodes in the node ptr table.
+	@Test
+	public void testMakeNodePtrTblIfStaleAfterGetPath() throws IOException {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		dg.addInitNode(1L, tidx);
+		final long[] ptrs = addChain(dg, tidx, 4);
+		dg.createCache();
+		dg.getPath(4L, tidx);
+		dg.destroyCache();
+
+		dg.makeNodePtrTblIfStale();
+		for (int i = 0; i < ptrs.length; i++) {
+			assertEquals(ptrs[i], dg.getLink(i + 1L, tidx));
+		}
+	}
+
 	// No init node makes DiskGraph#getPath never break from the while loop
 	@Test
 	public void testGetPathWithoutInitNoTableau() throws IOException {

@@ -192,6 +192,7 @@ public class TableauDiskGraph extends AbstractDiskGraph {
 		if (!isFilePointer(oldLink)) {
 			return oldLink;
 		}
+		markNodePtrTblStale();
 		TableauNodePtrTable.putElem(node, link, cloc);
 		return -1;
 	}
@@ -201,6 +202,7 @@ public class TableauDiskGraph extends AbstractDiskGraph {
 	 */
 	public void setMaxLink(long state, int tidx) {
 		assert tidx >= 0;
+		markNodePtrTblStale();
 		this.nodePtrTbl.put(state, tidx, MAX_LINK);
 	}
 

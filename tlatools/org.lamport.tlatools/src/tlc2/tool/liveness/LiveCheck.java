@@ -344,7 +344,7 @@ public class LiveCheck implements ILiveCheck {
 		// Reset after checking unless it's the final check:
 		if (finalCheck == false) {
 			for (int i = 0; i < checker.length; i++) {
-				checker[i].getDiskGraph().makeNodePtrTbl();
+				checker[i].getDiskGraph().makeNodePtrTblIfStale();
 			}
 		}
 		MP.printMessage(EC.TLC_CHECKING_TEMPORAL_PROPS_END, TLC.convertRuntimeToHumanReadable(System.currentTimeMillis() - startTime));

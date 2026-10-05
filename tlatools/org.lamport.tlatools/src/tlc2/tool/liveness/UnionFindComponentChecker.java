@@ -102,7 +102,7 @@ final class UnionFindComponentChecker {
 			throws IOException, InterruptedException {
 		// The search never assigns links, thus getLink returns the nodes' file
 		// pointers, which identify the nodes.
-		this.dg.makeNodePtrTbl();
+		this.dg.makeNodePtrTblIfStale();
 		this.dg.prepareForReads();
 
 		final int expectedNodes = (int) Math.min(this.dg.size(), Integer.MAX_VALUE / 2);

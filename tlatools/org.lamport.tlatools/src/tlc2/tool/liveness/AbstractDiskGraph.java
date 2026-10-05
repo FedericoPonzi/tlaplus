@@ -51,6 +51,9 @@ import util.FileUtil;
  *   {@link DiskGraph} (we can have >1 when there are more {@link OrderOfSolution})
  */
 public abstract class AbstractDiskGraph {
+
+	private volatile boolean nodePtrTblStale;
+
 	/**
 	 * DiskGraph stores a graph on disk. We use two disk files to store the
 	 * graph. For each node in the graph, the first file stores the successors
@@ -303,6 +306,26 @@ public abstract class AbstractDiskGraph {
 		long len = this.nodePtrRAF.length();
 		this.makeNodePtrTbl(len);
 		this.nodePtrRAF.seek(ptr);
+		this.nodePtrTblStale = false;
+	}
+
+	/**
+	 * Unlike Tarjan's, the UFSCC search does not assign links, thus the
+	 * rebuild of the node-pointer table is only needed if a previous search
+	 * or getPath overwrote its file pointers.
+	 */
+	public final void makeNodePtrTblIfStale() throws IOException {
+		if (this.nodePtrTblStale) {
+			this.makeNodePtrTbl();
+		}
+	}
+
+	final boolean isNodePtrTblStale() {
+		return this.nodePtrTblStale;
+	}
+
+	protected final void markNodePtrTblStale() {
+		this.nodePtrTblStale = true;
 	}
 
 	/**
