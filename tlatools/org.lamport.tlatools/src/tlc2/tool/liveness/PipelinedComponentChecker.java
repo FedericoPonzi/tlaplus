@@ -27,10 +27,8 @@ import java.io.UncheckedIOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -89,7 +87,7 @@ final class PipelinedComponentChecker implements AutoCloseable {
 	private final int maxInFlight;
 
 	private final ArrayDeque<Future<Component>> inFlight = new ArrayDeque<>();
-	private final Map<Thread, AbstractDiskGraph.NodeReader> readers = new ConcurrentHashMap<>();
+	private final NodeReaders readers;
 	private List<Component> batch = new ArrayList<>();
 	private long batchNodes = 0L;
 	private volatile boolean aborted = false;
@@ -106,8 +104,16 @@ final class PipelinedComponentChecker implements AutoCloseable {
 		this.checker = checker;
 		this.dg = dg;
 		this.batchSize = Math.max(1, Integer.getInteger(BATCH_PROPERTY, 4096));
-		this.splitSize = Math.max(1, Integer.getInteger(SPLIT_PROPERTY, 1 << 16));
+		this.splitSize = splitSize();
+		this.readers = new NodeReaders(dg);
 		this.maxInFlight = 4 * workers;
+	}
+
+	/**
+	 * @return The size from which on an SCC is checked by all workers.
+	 */
+	static int splitSize() {
+		return Math.max(1, Integer.getInteger(SPLIT_PROPERTY, 1 << 16));
 	}
 
 	/**
@@ -194,7 +200,7 @@ final class PipelinedComponentChecker implements AutoCloseable {
 		this.batch = new ArrayList<>();
 		this.batchNodes = 0L;
 		this.inFlight.addLast(this.pool.submit(tracked(() -> {
-			final AbstractDiskGraph.NodeReader reader = reader();
+			final AbstractDiskGraph.NodeReader reader = this.readers.get();
 			for (final Component c : components) {
 				if (this.aborted) {
 					return null;
@@ -220,9 +226,7 @@ final class PipelinedComponentChecker implements AutoCloseable {
 			c.com = com;
 		}
 		DISPATCHED.incrementAndGet();
-		final ComponentChecker.Result res = this.checker.newResult();
-		this.checker.check(c.com, 0, c.com.getSize(), reader::read, res);
-		return res.isCounterExample();
+		return this.checker.isCounterExample(c.com, reader::read);
 	}
 
 	private boolean checkSplit(final Component c) throws IOException, InterruptedException {
@@ -236,7 +240,7 @@ final class PipelinedComponentChecker implements AutoCloseable {
 			final int to = (int) ((long) size * (i + 1) / this.workers);
 			chunks.add(tracked(() -> {
 				final ComponentChecker.Result res = this.checker.newResult();
-				this.checker.check(com, from, to, reader()::read, res);
+				this.checker.check(com, from, to, this.readers.get()::read, res);
 				return res;
 			}));
 		}
@@ -298,16 +302,6 @@ final class PipelinedComponentChecker implements AutoCloseable {
 		};
 	}
 
-	private AbstractDiskGraph.NodeReader reader() {
-		return this.readers.computeIfAbsent(Thread.currentThread(), t -> {
-			try {
-				return this.dg.newNodeReader();
-			} catch (IOException e) {
-				throw new UncheckedIOException(e);
-			}
-		});
-	}
-
 	static <T> T get(final Future<T> f) throws IOException, InterruptedException {
 		try {
 			return f.get();
@@ -343,17 +337,6 @@ final class PipelinedComponentChecker implements AutoCloseable {
 		if (interrupted) {
 			Thread.currentThread().interrupt();
 		}
-		IOException ioe = null;
-		for (final AbstractDiskGraph.NodeReader r : this.readers.values()) {
-			try {
-				r.close();
-			} catch (IOException e) {
-				ioe = e;
-			}
-		}
-		this.readers.clear();
-		if (ioe != null) {
-			throw ioe;
-		}
+		this.readers.close();
 	}
 }

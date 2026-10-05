@@ -615,9 +615,7 @@ public class LiveWorker implements Callable<Boolean> {
 
 		// Check this component. Lookups must not grow com while it is iterated.
 		com.prepareForReads();
-		final ComponentChecker.Result res = this.checker.newResult();
-		this.checker.check(com, 0, com.getSize(), this.dg::getNode, res);
-		if (!res.isCounterExample()) {
+		if (!this.checker.isCounterExample(com, this.dg::getNode)) {
 //			writeDotViz(state, tidx, com, new java.io.File(liveCheck.getMetaDir() + java.io.File.separator
 //					+ "pValidSCC" + System.currentTimeMillis() + ".dot"));
 			return true;

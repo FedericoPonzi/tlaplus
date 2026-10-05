@@ -170,6 +170,31 @@ public class DiskGraphTest {
 	}
 
 	@Test
+	public void testNodeReadersPerThread() throws Exception {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		final long[] ptrs = addChain(dg, tidx, 1);
+
+		final NodeReaders readers = new NodeReaders(dg);
+		final AbstractDiskGraph.NodeReader mine = readers.get();
+		assertTrue(mine == readers.get());
+		final AbstractDiskGraph.NodeReader[] other = new AbstractDiskGraph.NodeReader[1];
+		final Thread t = new Thread(() -> other[0] = readers.get());
+		t.start();
+		t.join();
+		assertNotSame(mine, other[0]);
+
+		readers.close();
+		for (final AbstractDiskGraph.NodeReader r : new AbstractDiskGraph.NodeReader[] { mine, other[0] }) {
+			try {
+				r.read(1L, tidx, ptrs[0]);
+				fail("Expected the reader to be closed");
+			} catch (IOException expected) {
+			}
+		}
+	}
+
+	@Test
 	public void testGetLinkConcurrentlyAfterPrepareForReads() throws Exception {
 		final AbstractDiskGraph dg = getDiskGraph();
 		final int tidx = getTableauIndex();

@@ -137,6 +137,16 @@ final class ComponentChecker {
 	}
 
 	/**
+	 * @return true iff the whole SCC com violates liveness.
+	 * @see #check(TableauNodePtrTable, int, int, NodeSource, Result)
+	 */
+	boolean isCounterExample(final TableauNodePtrTable com, final NodeSource source) throws IOException {
+		final Result res = newResult();
+		check(com, 0, com.getSize(), source, res);
+		return res.isCounterExample();
+	}
+
+	/**
 	 * Accumulates into res which of the PEM's AEStates, AEActions, and
 	 * promises are satisfied by the nodes of the SCC com that are in com's
 	 * buckets [fromLoc, toLoc). Iterating all buckets [0, com.getSize())

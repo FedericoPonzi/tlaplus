@@ -33,7 +33,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
@@ -74,7 +73,7 @@ final class UnionFindComponentChecker {
 	private final int alen;
 	private final boolean isFinalCheck;
 	private final int splitSize;
-	private final Map<Thread, AbstractDiskGraph.NodeReader> readers = new ConcurrentHashMap<>();
+	private final NodeReaders readers;
 	// Checking a large SCC in the worker that completes it would serialize the
 	// check, thus all workers check them once the search is done.
 	private final Queue<UnionFindSccSearch.Node> deferred = new ConcurrentLinkedQueue<>();
@@ -88,7 +87,8 @@ final class UnionFindComponentChecker {
 		this.slen = oos.getCheckState().length;
 		this.alen = oos.getCheckAction().length;
 		this.isFinalCheck = isFinalCheck;
-		this.splitSize = Math.max(1, Integer.getInteger(PipelinedComponentChecker.SPLIT_PROPERTY, 1 << 16));
+		this.splitSize = PipelinedComponentChecker.splitSize();
+		this.readers = new NodeReaders(dg);
 	}
 
 	/**
@@ -128,7 +128,7 @@ final class UnionFindComponentChecker {
 		} catch (UncheckedIOException e) {
 			throw e.getCause();
 		} finally {
-			closeReaders();
+			this.readers.close();
 		}
 		TableauNodePtrTable com = this.bad.get();
 		if (com == null && !this.deferred.isEmpty()) {
@@ -193,7 +193,7 @@ final class UnionFindComponentChecker {
 				for (int i = 0; i < res.length; i++) {
 					res[i] = this.checker.newResult();
 				}
-				// Not reader(): a chunk may outlive an interrupted invokeAll.
+				// Not this.readers: a chunk may outlive an interrupted invokeAll.
 				try (AbstractDiskGraph.NodeReader reader = this.dg.newNodeReader()) {
 					for (int j = from; j < to; j++) {
 						final UnionFindSccSearch.Node n = nodes[j];
@@ -275,7 +275,7 @@ final class UnionFindComponentChecker {
 
 	private UnionFindSccSearch.Node[] successors(final UnionFindSccSearch.Node node,
 			final UnionFindSccSearch search) throws IOException {
-		final GraphNode gnode = reader().read(node.fp, node.tidx, node.ptr);
+		final GraphNode gnode = this.readers.get().read(node.fp, node.tidx, node.ptr);
 		final int succCnt = gnode.succSize();
 		final List<UnionFindSccSearch.Node> succs = new ArrayList<>(succCnt);
 		for (int i = 0; i < succCnt; i++) {
@@ -305,7 +305,7 @@ final class UnionFindComponentChecker {
 	 * @return true iff scc violates liveness (which stops the search).
 	 */
 	private boolean violates(final UnionFindSccSearch.Node root, final int size) throws IOException {
-		final AbstractDiskGraph.NodeReader reader = reader();
+		final AbstractDiskGraph.NodeReader reader = this.readers.get();
 		// Same as LiveWorker#checkComponent: A single node is trivial unless it
 		// stutters.
 		if (size == 1 && !this.checker.isStuttering(reader.read(root.fp, root.tidx, root.ptr))) {
@@ -316,37 +316,10 @@ final class UnionFindComponentChecker {
 			return false;
 		}
 		final TableauNodePtrTable com = toTable(UnionFindSccSearch.members(root));
-		final ComponentChecker.Result res = this.checker.newResult();
-		this.checker.check(com, 0, com.getSize(), reader::read, res);
-		if (!res.isCounterExample()) {
+		if (!this.checker.isCounterExample(com, reader::read)) {
 			return false;
 		}
 		this.bad.compareAndSet(null, com);
 		return true;
-	}
-
-	private AbstractDiskGraph.NodeReader reader() {
-		return this.readers.computeIfAbsent(Thread.currentThread(), t -> {
-			try {
-				return this.dg.newNodeReader();
-			} catch (IOException e) {
-				throw new UncheckedIOException(e);
-			}
-		});
-	}
-
-	private void closeReaders() throws IOException {
-		IOException ioe = null;
-		for (final AbstractDiskGraph.NodeReader r : this.readers.values()) {
-			try {
-				r.close();
-			} catch (IOException e) {
-				ioe = e;
-			}
-		}
-		this.readers.clear();
-		if (ioe != null) {
-			throw ioe;
-		}
 	}
 }
