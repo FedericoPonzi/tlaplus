@@ -23,6 +23,8 @@
 package tlc2.tool.liveness;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -38,6 +40,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.AfterClass;
@@ -173,9 +176,12 @@ public class UnionFindSccSearchTest {
 		final List<Set<Integer>> sccs = Collections.synchronizedList(new ArrayList<>());
 
 		@Override
-		public boolean found(final List<UnionFindSccSearch.Node> scc) {
+		public boolean found(final UnionFindSccSearch.Node root, final int size) {
+			final List<UnionFindSccSearch.Node> scc = UnionFindSccSearch.members(root);
+			assertEquals(size, scc.size());
 			final Set<Integer> s = new HashSet<>();
 			for (final UnionFindSccSearch.Node n : scc) {
+				assertSame(root, UnionFindSccSearch.root(n));
 				assertTrue("Node reported twice within an SCC", s.add((int) n.fp));
 			}
 			sccs.add(s);
@@ -318,9 +324,9 @@ public class UnionFindSccSearchTest {
 		}
 		g.inits.add(0);
 		final AtomicInteger calls = new AtomicInteger();
-		final UnionFindSccSearch search = new UnionFindSccSearch(4, successorsOf(g), scc -> {
+		final UnionFindSccSearch search = new UnionFindSccSearch(4, successorsOf(g), (root, size) -> {
 			calls.incrementAndGet();
-			return scc.size() > 1;
+			return size > 1;
 		});
 		search.addRoot(search.node(0, 0, 0));
 		search.run(pool);
@@ -346,7 +352,7 @@ public class UnionFindSccSearchTest {
 			} finally {
 				active.decrementAndGet();
 			}
-		}, scc -> false);
+		}, (root, size) -> false);
 		for (int v = 0; v < g.n; v++) {
 			search.addRoot(search.node(v, 0, v));
 		}
@@ -365,7 +371,7 @@ public class UnionFindSccSearchTest {
 		g.edge(0, 1, false);
 		g.edge(1, 0, false);
 		g.inits.add(0);
-		final UnionFindSccSearch search = new UnionFindSccSearch(2, successorsOf(g), scc -> {
+		final UnionFindSccSearch search = new UnionFindSccSearch(2, successorsOf(g), (root, size) -> {
 			throw new IllegalStateException("listener");
 		});
 		search.addRoot(search.node(0, 0, 0));
@@ -375,6 +381,49 @@ public class UnionFindSccSearchTest {
 		} catch (IllegalStateException e) {
 			assertEquals("listener", e.getMessage());
 		}
+	}
+
+	// The node table starts small (16) and has to grow while the workers
+	// concurrently look up and create nodes.
+	@Test
+	public void testNodeIsUniquePerFpAndTidxConcurrently() throws Exception {
+		final UnionFindSccSearch search = new UnionFindSccSearch(1, (node, s) -> new UnionFindSccSearch.Node[0],
+				(root, size) -> false);
+		// Prime, thus each thread's stride visits every ptr.
+		final int n = 100_003;
+		final int threads = 8;
+		final UnionFindSccSearch.Node[][] seen = new UnionFindSccSearch.Node[threads][n];
+		final List<Future<?>> futures = new ArrayList<>();
+		for (int t = 0; t < threads; t++) {
+			final int tt = t;
+			futures.add(pool.submit(() -> {
+				for (int k = 0; k < n; k++) {
+					// Each thread visits the ptrs in a different order.
+					final int i = (int) ((k * (2L * tt + 1)) % n);
+					// Nodes of the same fp differ in tidx.
+					seen[tt][i] = search.node(i / 3, i % 3, i * 37L);
+				}
+			}));
+		}
+		for (final Future<?> f : futures) {
+			f.get();
+		}
+		for (int i = 0; i < n; i++) {
+			assertEquals(i * 37L, seen[0][i].ptr);
+			for (int t = 1; t < threads; t++) {
+				assertSame(seen[0][i], seen[t][i]);
+			}
+			assertSame(seen[0][i], search.get(i / 3, i % 3));
+		}
+		assertNull(search.get(0L, 3));
+		assertNull(search.get(n, 0));
+
+		final Set<Long> scanned = Collections.synchronizedSet(new HashSet<>());
+		final int chunks = 3;
+		for (int c = 0; c < chunks; c++) {
+			search.forEachNode(c, chunks, node -> assertTrue(scanned.add(node.ptr)));
+		}
+		assertEquals(n, scanned.size());
 	}
 
 	@Test

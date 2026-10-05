@@ -62,7 +62,7 @@ public class SccPoolShutdownTest {
 	@Test(timeout = 60000)
 	public void testUfsccWaitingForDroppedWorker() throws Exception {
 		final UnionFindSccSearch search = new UnionFindSccSearch(2, (n, s) -> new UnionFindSccSearch.Node[0],
-				scc -> false);
+				(root, size) -> false);
 		search.addRoot(search.node(1L, -1, 0L));
 		assertUnblockedByShutdown(1, () -> search.run(pool));
 	}

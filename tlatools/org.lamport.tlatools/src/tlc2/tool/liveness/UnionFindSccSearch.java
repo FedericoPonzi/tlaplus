@@ -27,11 +27,12 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.SplittableRandom;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+import java.util.concurrent.atomic.AtomicReferenceArray;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
@@ -62,11 +63,12 @@ final class UnionFindSccSearch {
 
 	interface SccListener {
 		/**
-		 * Called concurrently by the workers.
+		 * Called concurrently by the workers with the root of a complete SCC,
+		 * whose nodes are {@link UnionFindSccSearch#members(Node)}.
 		 * 
 		 * @return true to stop the search.
 		 */
-		boolean found(List<Node> scc) throws IOException;
+		boolean found(Node root, int size) throws IOException;
 	}
 
 	static final class Node {
@@ -109,7 +111,11 @@ final class UnionFindSccSearch {
 			"queued");
 
 	// Returned by pickFromList to the worker that found the set to be complete.
-	private static final Node COMPLETED = new Node(-1, -1, -1);
+	private static final int COMPLETED = -1;
+
+	// A worker picks up to this many nodes from a set's live list at once,
+	// which divides the acquisitions of the root's lock.
+	private static final int MAX_PICKS = 64;
 
 	private enum Claim {
 		DEAD, FOUND, SUCCESS
@@ -118,7 +124,7 @@ final class UnionFindSccSearch {
 	private final int workers;
 	private final Successors successors;
 	private final SccListener listener;
-	private final ConcurrentHashMap<Long, Node> nodes;
+	private final NodeTable nodes;
 	private final List<Node> roots = new ArrayList<>();
 	private final AtomicReference<Throwable> failure = new AtomicReference<>();
 	private volatile boolean stop = false;
@@ -134,25 +140,36 @@ final class UnionFindSccSearch {
 	}
 
 	/**
-	 * @param expectedNodes Sizes the node map, which is expensive to grow.
+	 * @param expectedNodes Initial capacity of the node table.
 	 */
 	UnionFindSccSearch(final int workers, final int expectedNodes, final Successors successors,
 			final SccListener listener) {
 		this.workers = Math.max(1, Math.min(MAX_WORKERS, workers));
-		this.nodes = new ConcurrentHashMap<>(expectedNodes);
+		this.nodes = new NodeTable(expectedNodes);
 		this.successors = successors;
 		this.listener = listener;
 	}
 
 	/**
-	 * @return The node with the given ptr, created if it does not exist yet.
+	 * @return The node <fp, tidx>, created with ptr if it does not exist yet.
 	 */
 	Node node(final long fp, final int tidx, final long ptr) {
-		final Node n = this.nodes.get(ptr);
-		if (n != null) {
-			return n;
-		}
-		return this.nodes.computeIfAbsent(ptr, p -> new Node(fp, tidx, ptr));
+		return this.nodes.getOrCreate(fp, tidx, ptr);
+	}
+
+	/**
+	 * @return The node <fp, tidx> or null if it does not exist.
+	 */
+	Node get(final long fp, final int tidx) {
+		return this.nodes.get(fp, tidx);
+	}
+
+	/**
+	 * Applies action to the nodes of the given chunk of the node table. Must
+	 * not run concurrently with {@link #node(long, int, long)}.
+	 */
+	void forEachNode(final int chunk, final int chunks, final Consumer<Node> action) {
+		this.nodes.forEach(chunk, chunks, action);
 	}
 
 	/**
@@ -265,7 +282,10 @@ final class UnionFindSccSearch {
 
 	private static final class Frame {
 		final Node v;
-		Node cur;
+		// The nodes picked from v's set; doubles up to MAX_PICKS with each pick.
+		Node[] picked;
+		int picks;
+		int next;
 		Node[] succ;
 		int i;
 
@@ -321,20 +341,26 @@ final class UnionFindSccSearch {
 					}
 					continue;
 				}
-				if (f.cur != null) {
-					removeFromList(f.cur);
-					f.cur = null;
-					f.succ = null;
-				}
-				final Node next = pickFromList(f.v);
-				if (next != null && next != COMPLETED) {
-					f.cur = next;
-					f.succ = successors.of(next, UnionFindSccSearch.this);
+				if (f.next < f.picks) {
+					f.succ = successors.of(f.picked[f.next++], UnionFindSccSearch.this);
 					f.i = 0;
 					shuffle(f.succ);
 					continue;
 				}
-				if (next == COMPLETED && report(f.v)) {
+				if (f.picks > 0) {
+					removeFromList(f.picked, f.picks);
+					f.picks = 0;
+					f.next = 0;
+					f.succ = null;
+				}
+				f.picked = f.picked == null ? new Node[1]
+						: f.picked.length < MAX_PICKS ? new Node[2 * f.picked.length] : f.picked;
+				final int picks = pickFromList(f.v, f.picked);
+				if (picks > 0) {
+					f.picks = picks;
+					continue;
+				}
+				if (picks == COMPLETED && report(f.v)) {
 					stopped = true;
 					stop = true;
 					return;
@@ -394,13 +420,28 @@ final class UnionFindSccSearch {
 
 	private boolean report(final Node n) throws IOException {
 		final Node r = find(n);
+		return this.listener.found(r, r.size);
+	}
+
+	/**
+	 * @return The nodes of the complete SCC whose root is r.
+	 */
+	static List<Node> members(final Node r) {
 		final List<Node> scc = new ArrayList<>(r.size);
 		Node m = r;
 		do {
 			scc.add(m);
 			m = m.nextMember;
 		} while (m != r);
-		return this.listener.found(scc);
+		return scc;
+	}
+
+	/**
+	 * @return The root of n's set, which identifies n's SCC once the set is
+	 *         complete.
+	 */
+	static Node root(final Node n) {
+		return find(n);
 	}
 
 	private static Node find(final Node n) {
@@ -485,11 +526,14 @@ final class UnionFindSccSearch {
 	}
 
 	/**
-	 * @return A node of n's set that is not fully explored yet, null if the set
-	 *         is complete, or {@link #COMPLETED} if the set is complete and the
-	 *         caller is the one to report it.
+	 * Copies up to out.length distinct nodes of n's set that are not fully
+	 * explored yet to out.
+	 * 
+	 * @return The number of copied nodes, 0 if the set is complete, or
+	 *         {@link #COMPLETED} if the set is complete and the caller is the
+	 *         one to report it.
 	 */
-	private static Node pickFromList(final Node n) {
+	private static int pickFromList(final Node n, final Node[] out) {
 		while (true) {
 			final Node r = find(n);
 			synchronized (r) {
@@ -497,43 +541,165 @@ final class UnionFindSccSearch {
 					continue;
 				}
 				if (r.dead) {
-					return null;
+					return 0;
 				}
 				final Node h = r.liveHead;
 				if (h == null) {
 					r.dead = true;
 					return COMPLETED;
 				}
+				int k = 0;
+				Node x = h;
+				do {
+					out[k++] = x;
+					x = x.liveNext;
+				} while (k < out.length && x != h);
 				// Rotate to spread the workers over the set.
-				r.liveHead = h.liveNext;
-				return h;
+				r.liveHead = x;
+				return k;
 			}
 		}
 	}
 
-	private static void removeFromList(final Node n) {
+	/**
+	 * Removes the given nodes, which are of the same set, from the set's live
+	 * list.
+	 */
+	private static void removeFromList(final Node[] ns, final int cnt) {
 		while (true) {
-			final Node r = find(n);
+			final Node r = find(ns[0]);
 			synchronized (r) {
 				if (r.parent != r) {
 					continue;
 				}
-				if (!n.inLive) {
-					return;
+				for (int j = 0; j < cnt; j++) {
+					final Node n = ns[j];
+					if (!n.inLive) {
+						continue;
+					}
+					n.inLive = false;
+					if (n.liveNext == n) {
+						r.liveHead = null;
+					} else {
+						n.livePrev.liveNext = n.liveNext;
+						n.liveNext.livePrev = n.livePrev;
+						if (r.liveHead == n) {
+							r.liveHead = n.liveNext;
+						}
+					}
+					n.liveNext = n;
+					n.livePrev = n;
 				}
-				n.inLive = false;
-				if (n.liveNext == n) {
-					r.liveHead = null;
-				} else {
-					n.livePrev.liveNext = n.liveNext;
-					n.liveNext.livePrev = n.livePrev;
-					if (r.liveHead == n) {
-						r.liveHead = n.liveNext;
+				return;
+			}
+		}
+	}
+
+	/**
+	 * Maps <fp, tidx> to the node. Unlike a ConcurrentHashMap<Long, Node>, it
+	 * does not box the keys, and only creating a node locks (one of many
+	 * shards, each of which grows independently).
+	 */
+	private static final class NodeTable {
+		private static final int SHARD_BITS = 10;
+		private static final int SHARDS = 1 << SHARD_BITS;
+
+		private static final class Shard {
+			// Replaced, never modified, once full: A lock-free get that reads a
+			// stale array misses only nodes created concurrently.
+			private volatile AtomicReferenceArray<Node> slots;
+			private int count;
+
+			Shard(final int capacity) {
+				this.slots = new AtomicReferenceArray<>(capacity);
+			}
+
+			Node get(final long fp, final int tidx, final int h) {
+				final AtomicReferenceArray<Node> a = this.slots;
+				final int mask = a.length() - 1;
+				for (int i = h & mask;; i = (i + 1) & mask) {
+					final Node n = a.get(i);
+					if (n == null || (n.fp == fp && n.tidx == tidx)) {
+						return n;
 					}
 				}
-				n.liveNext = n;
-				n.livePrev = n;
-				return;
+			}
+
+			// Caller holds the lock.
+			void add(final Node n, final int h) {
+				AtomicReferenceArray<Node> a = this.slots;
+				if (3 * (this.count + 1) > 2 * a.length()) {
+					final AtomicReferenceArray<Node> b = new AtomicReferenceArray<>(2 * a.length());
+					for (int i = 0; i < a.length(); i++) {
+						final Node m = a.get(i);
+						if (m != null) {
+							put(b, m, hash(m.fp, m.tidx) >>> SHARD_BITS);
+						}
+					}
+					this.slots = a = b;
+				}
+				put(a, n, h);
+				this.count++;
+			}
+
+			private static void put(final AtomicReferenceArray<Node> a, final Node n, final int h) {
+				final int mask = a.length() - 1;
+				int i = h & mask;
+				while (a.get(i) != null) {
+					i = (i + 1) & mask;
+				}
+				a.set(i, n);
+			}
+		}
+
+		private final Shard[] shards = new Shard[SHARDS];
+
+		NodeTable(final int expectedNodes) {
+			final long perShard = Math.max(16, 2L * expectedNodes / SHARDS);
+			final int capacity = (int) Math.min(1 << 30, Long.highestOneBit(perShard - 1) << 1);
+			for (int i = 0; i < SHARDS; i++) {
+				this.shards[i] = new Shard(capacity);
+			}
+		}
+
+		private static int hash(final long fp, final int tidx) {
+			final long h = (fp + tidx) * 0x9E3779B97F4A7C15L;
+			return (int) (h ^ (h >>> 32));
+		}
+
+		Node get(final long fp, final int tidx) {
+			final int h = hash(fp, tidx);
+			return this.shards[h & (SHARDS - 1)].get(fp, tidx, h >>> SHARD_BITS);
+		}
+
+		Node getOrCreate(final long fp, final int tidx, final long ptr) {
+			final int h = hash(fp, tidx);
+			final Shard s = this.shards[h & (SHARDS - 1)];
+			Node n = s.get(fp, tidx, h >>> SHARD_BITS);
+			if (n != null) {
+				return n;
+			}
+			synchronized (s) {
+				n = s.get(fp, tidx, h >>> SHARD_BITS);
+				if (n == null) {
+					n = new Node(fp, tidx, ptr);
+					s.add(n, h >>> SHARD_BITS);
+				}
+				return n;
+			}
+		}
+
+		void forEach(final int chunk, final int chunks, final Consumer<Node> action) {
+			final int from = (int) ((long) SHARDS * chunk / chunks);
+			final int to = (int) ((long) SHARDS * (chunk + 1) / chunks);
+			for (int i = from; i < to; i++) {
+				final AtomicReferenceArray<Node> a = this.shards[i].slots;
+				for (int j = 0; j < a.length(); j++) {
+					final Node n = a.get(j);
+					if (n != null) {
+						action.accept(n);
+					}
+				}
 			}
 		}
 	}

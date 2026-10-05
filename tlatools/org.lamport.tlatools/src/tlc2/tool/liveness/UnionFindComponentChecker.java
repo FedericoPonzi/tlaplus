@@ -26,6 +26,9 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
@@ -74,7 +77,7 @@ final class UnionFindComponentChecker {
 	private final Map<Thread, AbstractDiskGraph.NodeReader> readers = new ConcurrentHashMap<>();
 	// Checking a large SCC in the worker that completes it would serialize the
 	// check, thus all workers check them once the search is done.
-	private final Queue<TableauNodePtrTable> deferred = new ConcurrentLinkedQueue<>();
+	private final Queue<UnionFindSccSearch.Node> deferred = new ConcurrentLinkedQueue<>();
 	private final AtomicReference<TableauNodePtrTable> bad = new AtomicReference<>();
 
 	private UnionFindComponentChecker(final AbstractDiskGraph dg, final ComponentChecker checker,
@@ -128,39 +131,104 @@ final class UnionFindComponentChecker {
 			closeReaders();
 		}
 		TableauNodePtrTable com = this.bad.get();
-		for (final TableauNodePtrTable d : this.deferred) {
-			if (com != null) {
-				break;
-			}
-			if (checkSplit(pool, workers, d)) {
-				com = d;
+		if (com == null && !this.deferred.isEmpty()) {
+			final UnionFindSccSearch.Node root = checkDeferred(pool, workers, search);
+			if (root != null) {
+				com = toTable(UnionFindSccSearch.members(root));
 			}
 		}
 		return com == null ? null : entry(com);
 	}
 
-	private boolean checkSplit(final ExecutorService pool, final int workers, final TableauNodePtrTable com)
-			throws IOException, InterruptedException {
-		SPLITS.incrementAndGet();
-		final int size = com.getSize();
-		final List<Callable<ComponentChecker.Result>> chunks = new ArrayList<>(workers);
-		for (int i = 0; i < workers; i++) {
-			final int from = (int) ((long) size * i / workers);
-			final int to = (int) ((long) size * (i + 1) / workers);
-			chunks.add(() -> {
-				// Not reader(): a chunk may outlive an interrupted invokeAll.
-				try (AbstractDiskGraph.NodeReader reader = this.dg.newNodeReader()) {
-					final ComponentChecker.Result res = this.checker.newResult();
-					this.checker.check(com, from, to, reader::read, res);
-					return res;
-				}
+	/**
+	 * Checks the deferred SCCs in a single pass of all workers over the nodes,
+	 * which unlike building an SCC's {@link TableauNodePtrTable} first, is not
+	 * serial.
+	 * 
+	 * @return The root of a deferred SCC that violates liveness or null.
+	 */
+	private UnionFindSccSearch.Node checkDeferred(final ExecutorService pool, final int workers,
+			final UnionFindSccSearch search) throws IOException, InterruptedException {
+		final List<UnionFindSccSearch.Node> roots = new ArrayList<>(this.deferred);
+		SPLITS.addAndGet(roots.size());
+		final Map<UnionFindSccSearch.Node, Integer> index = new IdentityHashMap<>();
+		final ComponentChecker.Members[] members = new ComponentChecker.Members[roots.size()];
+		for (int i = 0; i < roots.size(); i++) {
+			final UnionFindSccSearch.Node root = roots.get(i);
+			index.put(root, i);
+			members[i] = (fp, tidx) -> {
+				final UnionFindSccSearch.Node n = search.get(fp, tidx);
+				return n != null && UnionFindSccSearch.root(n) == root;
+			};
+		}
+		// Sorted by ptr, a chunk's reads are sequential and mostly served by the
+		// reader's buffer instead of each costing a syscall.
+		final List<Callable<List<UnionFindSccSearch.Node>>> collect = new ArrayList<>(workers);
+		for (int c = 0; c < workers; c++) {
+			final int chunk = c;
+			collect.add(() -> {
+				final List<UnionFindSccSearch.Node> nodes = new ArrayList<>();
+				search.forEachNode(chunk, workers, n -> {
+					if (index.containsKey(UnionFindSccSearch.root(n))) {
+						nodes.add(n);
+					}
+				});
+				return nodes;
 			});
 		}
-		final ComponentChecker.Result res = this.checker.newResult();
-		for (final Future<ComponentChecker.Result> f : pool.invokeAll(chunks)) {
-			res.or(PipelinedComponentChecker.get(f));
+		final List<UnionFindSccSearch.Node> all = new ArrayList<>();
+		for (final Future<List<UnionFindSccSearch.Node>> f : pool.invokeAll(collect)) {
+			all.addAll(PipelinedComponentChecker.get(f));
 		}
-		return res.isCounterExample();
+		final UnionFindSccSearch.Node[] nodes = all.toArray(new UnionFindSccSearch.Node[all.size()]);
+		all.clear();
+		Arrays.parallelSort(nodes, Comparator.comparingLong(n -> n.ptr));
+
+		final List<Callable<ComponentChecker.Result[]>> chunks = new ArrayList<>(workers);
+		for (int c = 0; c < workers; c++) {
+			final int from = (int) ((long) nodes.length * c / workers);
+			final int to = (int) ((long) nodes.length * (c + 1) / workers);
+			chunks.add(() -> {
+				final ComponentChecker.Result[] res = new ComponentChecker.Result[roots.size()];
+				for (int i = 0; i < res.length; i++) {
+					res[i] = this.checker.newResult();
+				}
+				// Not reader(): a chunk may outlive an interrupted invokeAll.
+				try (AbstractDiskGraph.NodeReader reader = this.dg.newNodeReader()) {
+					for (int j = from; j < to; j++) {
+						final UnionFindSccSearch.Node n = nodes[j];
+						final int i = index.get(UnionFindSccSearch.root(n));
+						this.checker.check(reader.read(n.fp, n.tidx, n.ptr), members[i], res[i]);
+					}
+				}
+				return res;
+			});
+		}
+		final ComponentChecker.Result[] res = new ComponentChecker.Result[roots.size()];
+		for (int i = 0; i < res.length; i++) {
+			res[i] = this.checker.newResult();
+		}
+		for (final Future<ComponentChecker.Result[]> f : pool.invokeAll(chunks)) {
+			final ComponentChecker.Result[] r = PipelinedComponentChecker.get(f);
+			for (int i = 0; i < res.length; i++) {
+				res[i].or(r[i]);
+			}
+		}
+		for (int i = 0; i < res.length; i++) {
+			if (res[i].isCounterExample()) {
+				return roots.get(i);
+			}
+		}
+		return null;
+	}
+
+	private static TableauNodePtrTable toTable(final List<UnionFindSccSearch.Node> scc) {
+		final TableauNodePtrTable com = new TableauNodePtrTable(Math.max(128, 2 * scc.size()));
+		for (final UnionFindSccSearch.Node n : scc) {
+			com.put(n.fp, n.tidx, n.ptr);
+		}
+		com.prepareForReads();
+		return com;
 	}
 
 	/**
@@ -213,13 +281,17 @@ final class UnionFindComponentChecker {
 		for (int i = 0; i < succCnt; i++) {
 			final long nextState = gnode.getStateFP(i);
 			final int nextTidx = gnode.getTidx(i);
-			final long nextLink = this.dg.getLink(nextState, nextTidx);
+			// Cheaper than getLink, which dominated the search's profile.
+			UnionFindSccSearch.Node next = search.get(nextState, nextTidx);
+			if (next == null) {
+				final long nextLink = this.dg.getLink(nextState, nextTidx);
 			// Same as LiveWorker#checkSccs.
-			if (nextLink < 0) {
-				assert !this.isFinalCheck || nextLink != TableauNodePtrTable.UNDONE;
-				continue;
+				if (nextLink < 0) {
+					assert !this.isFinalCheck || nextLink != TableauNodePtrTable.UNDONE;
+					continue;
+				}
+				next = search.node(nextState, nextTidx, nextLink);
 			}
-			final UnionFindSccSearch.Node next = search.node(nextState, nextTidx, nextLink);
 			if (gnode.getCheckAction(this.slen, this.alen, i, this.eaaction)) {
 				succs.add(next);
 			} else {
@@ -232,23 +304,18 @@ final class UnionFindComponentChecker {
 	/**
 	 * @return true iff scc violates liveness (which stops the search).
 	 */
-	private boolean violates(final List<UnionFindSccSearch.Node> scc) throws IOException {
+	private boolean violates(final UnionFindSccSearch.Node root, final int size) throws IOException {
 		final AbstractDiskGraph.NodeReader reader = reader();
-		final UnionFindSccSearch.Node first = scc.get(0);
 		// Same as LiveWorker#checkComponent: A single node is trivial unless it
 		// stutters.
-		if (scc.size() == 1 && !this.checker.isStuttering(reader.read(first.fp, first.tidx, first.ptr))) {
+		if (size == 1 && !this.checker.isStuttering(reader.read(root.fp, root.tidx, root.ptr))) {
 			return false;
 		}
-		final TableauNodePtrTable com = new TableauNodePtrTable(Math.max(128, 2 * scc.size()));
-		for (final UnionFindSccSearch.Node n : scc) {
-			com.put(n.fp, n.tidx, n.ptr);
-		}
-		com.prepareForReads();
-		if (scc.size() >= this.splitSize) {
-			this.deferred.add(com);
+		if (size >= this.splitSize) {
+			this.deferred.add(root);
 			return false;
 		}
+		final TableauNodePtrTable com = toTable(UnionFindSccSearch.members(root));
 		final ComponentChecker.Result res = this.checker.newResult();
 		this.checker.check(com, 0, com.getSize(), reader::read, res);
 		if (!res.isCounterExample()) {

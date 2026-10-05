@@ -41,6 +41,11 @@ final class ComponentChecker {
 		GraphNode getNode(long stateFP, int tidx, long ptr) throws IOException;
 	}
 
+	@FunctionalInterface
+	interface Members {
+		boolean contains(long stateFP, int tidx);
+	}
+
 	/**
 	 * Which of the PEM's AEStates, AEActions, and promises are satisfied by (a
 	 * subset of) the nodes of an SCC.
@@ -149,13 +154,7 @@ final class ComponentChecker {
 	 */
 	void check(final TableauNodePtrTable com, final int fromLoc, final int toLoc, final NodeSource source,
 			final Result res) throws IOException {
-		final int aeslen = this.pem.AEState.length;
-		final int aealen = this.pem.AEAction.length;
-		final int plen = this.oos.getPromises().length;
-		final boolean[] AEStateRes = res.aeState;
-		final boolean[] AEActionRes = res.aeAction;
-		final boolean[] promiseRes = res.promise;
-		final int[] eaaction = this.pem.EAAction;
+		final Members members = (fp, tidx) -> com.getLoc(fp, tidx) != -1;
 
 		// Extract a node from the nodePtrTable "com".
 		// Note the upper limit is NodePtrTable#getSize() instead of
@@ -182,105 +181,119 @@ final class ComponentChecker {
 				final int tidx1 = TableauNodePtrTable.getTidx(nodes, nidx);
 				final long loc1 = TableauNodePtrTable.getElem(nodes, nidx);
 
-				final GraphNode curNode = source.getNode(state1, tidx1, loc1);
+				check(source.getNode(state1, tidx1, loc1), members, res);
+			}
+		}
+	}
 
-				// Check AEState:
-				for (int i = 0; i < aeslen; i++) {
-					// Only ever set AEStateRes[i] to true, but never to false
-					// once it was true. It only matters if one state in com
-					// satisfies PEM's liveness property due to []<>~p (which is
-					// the inversion of <>[]p).
-					// 
-					// It obviously has to check all nodes in the component
-					// (com) if either of them violates AEState unless all
-					// elements of AEStateRes are true. From that point onwards,
-					// checking further states wouldn't make a difference.
-					if (!AEStateRes[i]) {
-						int idx = this.pem.AEState[i];
-						AEStateRes[i] = curNode.getCheckState(idx);
-						// Can stop checking AEStates the moment AEStateRes
-						// is completely set to true. However, most of the time
-						// aeslen is small and the compiler will probably optimize
-						// out.
-					}
-				}
+	/**
+	 * Accumulates into res which of the PEM's AEStates, AEActions, and
+	 * promises are satisfied by curNode, a node of the SCC com.
+	 */
+	void check(final GraphNode curNode, final Members com, final Result res) {
+		final int aeslen = this.pem.AEState.length;
+		final int aealen = this.pem.AEAction.length;
+		final int plen = this.oos.getPromises().length;
+		final boolean[] AEStateRes = res.aeState;
+		final boolean[] AEActionRes = res.aeAction;
+		final boolean[] promiseRes = res.promise;
+		final int[] eaaction = this.pem.EAAction;
 
-				// Check AEAction: A TLA+ action represents the relationship
-				// between the current node and a successor state. The current
-				// node has n successor states. For each pair, see iff the 
-				// successor is in the "com" NodePtrTablecheck, check actions
-				// and store the results in AEActionRes(ult). Note that the
-				// actions have long been checked in advance when the node was
-				// added to the graph and the actual state and not just its
-				// fingerprint was available. Here, the result is just being
-				// looked up.
-				final int succCnt = aealen > 0 ? curNode.succSize() : 0; // No point in looping successors if there are no AEActions to check on them.
-				for (int i = 0; i < succCnt; i++) {
-					final long nextState = curNode.getStateFP(i);
-					final int nextTidx = curNode.getTidx(i);
-					// For each successor <<nextState, nextTdix>> of curNode's
-					// successors check, if it is part of the currently
-					// processed SCC (com). Successors, which are not part of
-					// the current SCC have obviously no relevance here. After
-					// all, we check the SCC.
-					if (com.getLoc(nextState, nextTidx) == -1) {
-						continue;
-					}
-					// MAK 10/23/2018:
-					// Line 380 above "if(gnode.getCheckAction)" causes a transition A from state s
-					// -> t to be skipped even if a belongs to an SCC iff the transition A does not
-					// satisfy the EA action of the PossibleErrorModel (if the EA action(s) is not
-					// satisfied, the PEM cannot hold at all).
-					// However, some state graphs are such that there exists not just the transition
-					// A from s -> t but a second transition A' from t -> s - which satisfies the EA
-					// action(s) of the PEM. In the case of a "bidirectional" transition, the states
-					// s and t will be in the set of states 'com' (which make up the SCC). Thus, the
-					// transition A from s -> t will be incorrectly traversed here unless it is
-					// skipped (again). Not skipping the transition A will result in TLC reporting a
-					// (bogus) counterexample even if the liveness is not violated.
-					// 
-					// Consider the spec BT for which TLC incorrectly reports a liveness property 
-					// violation and prints a bogus counterexample:
-					//
-					// ---- BT -----
-					// EXTENDS Naturals
-					// VARIABLE x
-					// A == \/ x' = (x + 1) % 3
-					// B == x' \in 0..2
-					// Spec == (x=0) /\ [][A \/ B]_x/\ WF_x(A)
-					// Prop == Spec /\ WF_x(A) /\ []<><<A>>_x
-					// =============
-					//
-					// > Temporal properties were violated.
-					// > The following behavior constitutes a counter-example:
-					// > 1: <Initial predicate>
-					// > x = 0
-					// > 2: <A line xx...BT>
-					// > x = 1
-					// > 1: Back to state: <B line xx... BT>
-					//
-					// (see tlc2.tool.BidirectionalTransitions1Test and BidirectionalTransitions2Test)
-					if(!curNode.getCheckAction(slen, alen, i, eaaction)) {
-						continue;
-					}
-					for (int j = 0; j < aealen; j++) {
-						// Only set false to true, but never true to false. 
-						if (!AEActionRes[j]) {
-							final int idx = this.pem.AEAction[j];
-							AEActionRes[j] = curNode.getCheckAction(slen, alen, i, idx);
-						}
-					}
-				}
+		// Check AEState:
+		for (int i = 0; i < aeslen; i++) {
+			// Only ever set AEStateRes[i] to true, but never to false
+			// once it was true. It only matters if one state in com
+			// satisfies PEM's liveness property due to []<>~p (which is
+			// the inversion of <>[]p).
+			// 
+			// It obviously has to check all nodes in the component
+			// (com) if either of them violates AEState unless all
+			// elements of AEStateRes are true. From that point onwards,
+			// checking further states wouldn't make a difference.
+			if (!AEStateRes[i]) {
+				int idx = this.pem.AEState[i];
+				AEStateRes[i] = curNode.getCheckState(idx);
+				// Can stop checking AEStates the moment AEStateRes
+				// is completely set to true. However, most of the time
+				// aeslen is small and the compiler will probably optimize
+				// out.
+			}
+		}
 
-				// Check that the component is fulfilling. (See MP page 453.)
-				// Note that the promises are precomputed and stored in oos.
-				for (int i = 0; i < plen; i++) {
-					final LNEven promise = this.oos.getPromises()[i];
-					final TBPar par = curNode.getTNode(this.oos.getTableau()).getPar();
-					if (par.isFulfilling(promise)) {
-						promiseRes[i] = true;
-					}
+		// Check AEAction: A TLA+ action represents the relationship
+		// between the current node and a successor state. The current
+		// node has n successor states. For each pair, see iff the 
+		// successor is in the "com" NodePtrTablecheck, check actions
+		// and store the results in AEActionRes(ult). Note that the
+		// actions have long been checked in advance when the node was
+		// added to the graph and the actual state and not just its
+		// fingerprint was available. Here, the result is just being
+		// looked up.
+		final int succCnt = aealen > 0 ? curNode.succSize() : 0; // No point in looping successors if there are no AEActions to check on them.
+		for (int i = 0; i < succCnt; i++) {
+			final long nextState = curNode.getStateFP(i);
+			final int nextTidx = curNode.getTidx(i);
+			// For each successor <<nextState, nextTdix>> of curNode's
+			// successors check, if it is part of the currently
+			// processed SCC (com). Successors, which are not part of
+			// the current SCC have obviously no relevance here. After
+			// all, we check the SCC.
+			if (!com.contains(nextState, nextTidx)) {
+				continue;
+			}
+			// MAK 10/23/2018:
+			// Line 380 above "if(gnode.getCheckAction)" causes a transition A from state s
+			// -> t to be skipped even if a belongs to an SCC iff the transition A does not
+			// satisfy the EA action of the PossibleErrorModel (if the EA action(s) is not
+			// satisfied, the PEM cannot hold at all).
+			// However, some state graphs are such that there exists not just the transition
+			// A from s -> t but a second transition A' from t -> s - which satisfies the EA
+			// action(s) of the PEM. In the case of a "bidirectional" transition, the states
+			// s and t will be in the set of states 'com' (which make up the SCC). Thus, the
+			// transition A from s -> t will be incorrectly traversed here unless it is
+			// skipped (again). Not skipping the transition A will result in TLC reporting a
+			// (bogus) counterexample even if the liveness is not violated.
+			// 
+			// Consider the spec BT for which TLC incorrectly reports a liveness property 
+			// violation and prints a bogus counterexample:
+			//
+			// ---- BT -----
+			// EXTENDS Naturals
+			// VARIABLE x
+			// A == \/ x' = (x + 1) % 3
+			// B == x' \in 0..2
+			// Spec == (x=0) /\ [][A \/ B]_x/\ WF_x(A)
+			// Prop == Spec /\ WF_x(A) /\ []<><<A>>_x
+			// =============
+			//
+			// > Temporal properties were violated.
+			// > The following behavior constitutes a counter-example:
+			// > 1: <Initial predicate>
+			// > x = 0
+			// > 2: <A line xx...BT>
+			// > x = 1
+			// > 1: Back to state: <B line xx... BT>
+			//
+			// (see tlc2.tool.BidirectionalTransitions1Test and BidirectionalTransitions2Test)
+			if(!curNode.getCheckAction(slen, alen, i, eaaction)) {
+				continue;
+			}
+			for (int j = 0; j < aealen; j++) {
+				// Only set false to true, but never true to false. 
+				if (!AEActionRes[j]) {
+					final int idx = this.pem.AEAction[j];
+					AEActionRes[j] = curNode.getCheckAction(slen, alen, i, idx);
 				}
+			}
+		}
+
+		// Check that the component is fulfilling. (See MP page 453.)
+		// Note that the promises are precomputed and stored in oos.
+		for (int i = 0; i < plen; i++) {
+			final LNEven promise = this.oos.getPromises()[i];
+			final TBPar par = curNode.getTNode(this.oos.getTableau()).getPar();
+			if (par.isFulfilling(promise)) {
+				promiseRes[i] = true;
 			}
 		}
 	}
