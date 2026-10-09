@@ -356,6 +356,20 @@ public class TableauNodePtrTable {
 		}
 	}
 
+	/**
+	 * Lookups ({@link #get(long, int)}, {@link #getLoc(long, int)}, ...) grow
+	 * the table if it has reached its threshold. Grows the table now instead,
+	 * so that subsequent lookups do not change its layout. Until the next
+	 * insertion, the table can then be iterated with
+	 * {@link #getNodesByLoc(int)} while looking up nodes, and be read by
+	 * multiple threads concurrently.
+	 */
+	public final void prepareForReads() {
+		if (this.count >= this.thresh) {
+			this.grow();
+		}
+	}
+
 	/* Double the table when the table is full by the threshhold. */
 	//@ requires 0 <= length;
 	private final void grow() {

@@ -51,6 +51,9 @@ import util.FileUtil;
  *   {@link DiskGraph} (we can have >1 when there are more {@link OrderOfSolution})
  */
 public abstract class AbstractDiskGraph {
+
+	private volatile boolean nodePtrTblStale;
+
 	/**
 	 * DiskGraph stores a graph on disk. We use two disk files to store the
 	 * graph. For each node in the graph, the first file stores the successors
@@ -80,6 +83,7 @@ public abstract class AbstractDiskGraph {
 	}
 
 	private final String chkptName;
+	private final File nodeFile;
 	protected final String metadir;
 	/**
 	 * @see tlatools/test/tlc2/tool/liveness/AbstractDiskGraph.JPG
@@ -100,8 +104,8 @@ public abstract class AbstractDiskGraph {
 		this.metadir = metadir;
 		this.outDegreeGraphStats = graphStats;
 		this.chkptName = metadir + FileUtil.separator + "dgraph_" + soln;
-		String fnameForNodes = metadir + FileUtil.separator + "nodes_" + soln;
-		this.nodeRAF = new BufferedRandomAccessFile(fnameForNodes, "rw");
+		this.nodeFile = new File(metadir + FileUtil.separator + "nodes_" + soln);
+		this.nodeRAF = new BufferedRandomAccessFile(this.nodeFile, "rw");
 		String fnameForPtrs = metadir + FileUtil.separator + "ptrs_" + soln;
 		this.nodePtrRAF = new BufferedRandomAccessFile(fnameForPtrs, "rw");
 		this.initNodes = new LongVec(1);
@@ -252,12 +256,76 @@ public abstract class AbstractDiskGraph {
 
 	public abstract long getPtr(long l, int tidx);
 
+	/**
+	 * Reads {@link GraphNode}s from this graph through its own file handle so
+	 * that multiple threads can read nodes concurrently (each thread with its
+	 * own reader). Nodes added to the graph after the reader has been created
+	 * might not be visible to the reader.
+	 * <p>
+	 * A {@link NodeReader} is not thread-safe and does not use the in-memory
+	 * cache of {@link AbstractDiskGraph#getNode(long, int, long)}.
+	 */
+	public final class NodeReader implements AutoCloseable {
+		private final BufferedRandomAccessFile raf;
+
+		private NodeReader(final BufferedRandomAccessFile raf) {
+			this.raf = raf;
+		}
+
+		public GraphNode read(final long stateFP, final int tidx, final long ptr) throws IOException {
+			if (ptr < 0) {
+				throw new IllegalArgumentException("Invalid negative file pointer: " + ptr);
+			}
+			this.raf.seek(ptr);
+			final GraphNode gnode = new GraphNode(stateFP, tidx);
+			gnode.read(this.raf);
+			return gnode;
+		}
+
+		@Override
+		public void close() throws IOException {
+			this.raf.close();
+		}
+	}
+
+	/**
+	 * @see NodeReader
+	 */
+	public final NodeReader newNodeReader() throws IOException {
+		synchronized (this) {
+			// Make nodes still in the write buffer visible to the new file handle.
+			this.nodeRAF.flush();
+		}
+		return new NodeReader(new BufferedRandomAccessFile(this.nodeFile, "r"));
+	}
+
+
 	/* Create the in-memory node-pointer table from the node-pointer file. */
 	public final void makeNodePtrTbl() throws IOException {
 		long ptr = this.nodePtrRAF.getFilePointer();
 		long len = this.nodePtrRAF.length();
 		this.makeNodePtrTbl(len);
 		this.nodePtrRAF.seek(ptr);
+		this.nodePtrTblStale = false;
+	}
+
+	/**
+	 * Unlike Tarjan's, the UFSCC search does not assign links, thus the
+	 * rebuild of the node-pointer table is only needed if a previous search
+	 * or getPath overwrote its file pointers.
+	 */
+	public final void makeNodePtrTblIfStale() throws IOException {
+		if (this.nodePtrTblStale) {
+			this.makeNodePtrTbl();
+		}
+	}
+
+	final boolean isNodePtrTblStale() {
+		return this.nodePtrTblStale;
+	}
+
+	protected final void markNodePtrTblStale() {
+		this.nodePtrTblStale = true;
 	}
 
 	/**
@@ -295,6 +363,12 @@ public abstract class AbstractDiskGraph {
 	 *            The corresponding tableau index
 	 */
 	public abstract long getLink(long state, int tidx);
+
+	/**
+	 * Makes {@link #getLink(long, int)} safe to call concurrently until the
+	 * graph is modified again.
+	 */
+	public abstract void prepareForReads();
 
 	/**
 	 * Assign link to node during SCC search. If a link has already been

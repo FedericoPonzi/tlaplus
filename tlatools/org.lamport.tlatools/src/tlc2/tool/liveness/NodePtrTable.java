@@ -74,6 +74,16 @@ public class NodePtrTable {
 		}
 	}
 
+	/**
+	 * Grows the table now if the next {@link #get(long)} would, so that
+	 * concurrent readers do not modify it.
+	 */
+	public final void prepareForReads() {
+		if (this.count >= this.thresh) {
+			this.grow();
+		}
+	}
+
 	/* Return the value with key k. Otherwise, return -1. */
 	public final long get(long k) {
 		if (count >= thresh) {

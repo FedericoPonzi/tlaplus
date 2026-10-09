@@ -289,17 +289,27 @@ public class LiveCheck implements ILiveCheck {
 		 * model checking after all LWs completed.
 		 */
 		final int wNum = TLCGlobals.doSequentialLiveness() ? 1 : Math.min(checker.length, TLCGlobals.getNumWorkers());
+		final SccStrategy sccStrategy = SccStrategy.current();
+		final int sccWorkers = SccStrategy.workers();
+		final ExecutorService sccPool = sccStrategy == SccStrategy.TARJAN ? null
+				: Executors.newFixedThreadPool(sccWorkers);
 		final ExecutorService pool = Executors.newFixedThreadPool(wNum);
 		// CS is really just a container around the set of Futures returned by the pool. It saves us from
 		// creating a low-level array.
 		final CompletionService<Boolean> completionService = new ExecutorCompletionService<Boolean>(pool);
 
 		for (int i = 0; i < wNum; i++) {
-			completionService.submit(new LiveWorker(tool, i, wNum, this, queue, finalCheck));
+			completionService.submit(new LiveWorker(tool, i, wNum, this, queue, finalCheck, sccStrategy, sccPool, sccWorkers));
 		}
 		// Wait for all LWs to complete.
 		pool.shutdown();
-		pool.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS); // wait forever
+		try {
+			pool.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS); // wait forever
+		} finally {
+			if (sccPool != null) {
+				shutdownNow(sccPool);
+			}
+		}
 
 		// Check if any one of the LWs found a violation (ignore failures for now).
 		ExecutionException ee = null;
@@ -334,7 +344,7 @@ public class LiveCheck implements ILiveCheck {
 		// Reset after checking unless it's the final check:
 		if (finalCheck == false) {
 			for (int i = 0; i < checker.length; i++) {
-				checker[i].getDiskGraph().makeNodePtrTbl();
+				checker[i].getDiskGraph().makeNodePtrTblIfStale();
 			}
 		}
 		MP.printMessage(EC.TLC_CHECKING_TEMPORAL_PROPS_END, TLC.convertRuntimeToHumanReadable(System.currentTimeMillis() - startTime));
@@ -342,6 +352,16 @@ public class LiveCheck implements ILiveCheck {
 		return EC.NO_ERROR;
 	}
 	
+	// shutdownNow drops queued tasks without completing them; cancel them so
+	// LiveWorkers blocked in Future#get do not hang.
+	static void shutdownNow(final ExecutorService pool) {
+		for (final Runnable r : pool.shutdownNow()) {
+			if (r instanceof Future) {
+				((Future<?>) r).cancel(false);
+			}
+		}
+	}
+
 	/* (non-Javadoc)
 	 * @see tlc2.tool.liveness.ILiveCheck#checkTrace(tlc2.tool.StateVec)
 	 */

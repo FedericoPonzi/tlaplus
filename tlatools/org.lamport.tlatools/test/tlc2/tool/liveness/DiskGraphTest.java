@@ -71,6 +71,199 @@ public class DiskGraphTest {
 		return temp;
 	}
 	
+	private long[] addChain(final AbstractDiskGraph dg, final int tidx, final int n) throws IOException {
+		final long[] ptrs = new long[n];
+		for (int i = 0; i < n; i++) {
+			final GraphNode node = new GraphNode(i + 1L, tidx);
+			// Successors to the next node and the node after that (if any).
+			for (int j = 1; j <= 2 && i + j < n; j++) {
+				node.addTransition(i + j + 1L, tidx, NUMBER_OF_SOLUTIONS, NUMBER_OF_ACTIONS, NO_ACTIONS,
+						NUMBER_OF_ACTIONS, 2 - j);
+			}
+			ptrs[i] = dg.addNode(node);
+		}
+		return ptrs;
+	}
+
+	private static void assertSameNode(final GraphNode expected, final GraphNode actual) {
+		assertEquals(expected, actual);
+		assertEquals(expected.succSize(), actual.succSize());
+		assertEquals(expected.getTransition(), actual.getTransition());
+	}
+
+	// The reader has to see nodes which are still in the write buffer of the
+	// graph's node file.
+	@Test
+	public void testNodeReaderSeesUnflushedNodes() throws IOException {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		final long[] ptrs = addChain(dg, tidx, 3);
+
+		dg.createCache();
+		try (AbstractDiskGraph.NodeReader reader = dg.newNodeReader()) {
+			for (int i = 0; i < ptrs.length; i++) {
+				assertSameNode(dg.getNode(i + 1L, tidx, ptrs[i]), reader.read(i + 1L, tidx, ptrs[i]));
+			}
+		}
+		dg.destroyCache();
+	}
+
+	@Test
+	public void testNodeReaderRejectsNegativePtr() throws IOException {
+		final AbstractDiskGraph dg = getDiskGraph();
+		addChain(dg, getTableauIndex(), 1);
+		try (AbstractDiskGraph.NodeReader reader = dg.newNodeReader()) {
+			reader.read(1L, getTableauIndex(), -1L);
+			fail("Expected IllegalArgumentException");
+		} catch (IllegalArgumentException expected) {
+		}
+	}
+
+	// Readers must not interfere with the graph's own reads (and its file
+	// pointer) nor with each other.
+	@Test
+	public void testNodeReadersConcurrently() throws Exception {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		// Enough nodes to span several 8k buffers of BufferedRandomAccessFile.
+		final int n = 5000;
+		final long[] ptrs = addChain(dg, tidx, n);
+		dg.createCache();
+		final GraphNode[] expected = new GraphNode[n];
+		for (int i = 0; i < n; i++) {
+			expected[i] = dg.getNode(i + 1L, tidx, ptrs[i]);
+		}
+
+		final int threads = 4;
+		final java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads + 1);
+		try {
+			final java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+			for (int t = 0; t < threads; t++) {
+				final int seed = t;
+				futures.add(pool.submit(() -> {
+					try (AbstractDiskGraph.NodeReader reader = dg.newNodeReader()) {
+						final java.util.Random rnd = new java.util.Random(seed);
+						for (int k = 0; k < 4 * n; k++) {
+							final int i = rnd.nextInt(n);
+							assertSameNode(expected[i], reader.read(i + 1L, tidx, ptrs[i]));
+						}
+					}
+					return null;
+				}));
+			}
+			// Concurrently read through the graph itself.
+			futures.add(pool.submit(() -> {
+				for (int k = 0; k < 2; k++) {
+					for (int i = n - 1; i >= 0; i--) {
+						assertSameNode(expected[i], dg.getNode(i + 1L, tidx, ptrs[i]));
+					}
+				}
+				return null;
+			}));
+			for (java.util.concurrent.Future<?> f : futures) {
+				f.get();
+			}
+		} finally {
+			pool.shutdownNow();
+			dg.destroyCache();
+		}
+	}
+
+	@Test
+	public void testNodeReadersPerThread() throws Exception {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		final long[] ptrs = addChain(dg, tidx, 1);
+
+		final NodeReaders readers = new NodeReaders(dg);
+		final AbstractDiskGraph.NodeReader mine = readers.get();
+		assertTrue(mine == readers.get());
+		final AbstractDiskGraph.NodeReader[] other = new AbstractDiskGraph.NodeReader[1];
+		final Thread t = new Thread(() -> other[0] = readers.get());
+		t.start();
+		t.join();
+		assertNotSame(mine, other[0]);
+
+		readers.close();
+		for (final AbstractDiskGraph.NodeReader r : new AbstractDiskGraph.NodeReader[] { mine, other[0] }) {
+			try {
+				r.read(1L, tidx, ptrs[0]);
+				fail("Expected the reader to be closed");
+			} catch (IOException expected) {
+			}
+		}
+	}
+
+	@Test
+	public void testGetLinkConcurrentlyAfterPrepareForReads() throws Exception {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		// Fill the node ptr table up to its threshold, at which the next
+		// (unsynchronized) getLink would grow it.
+		final int n = (int) (255 * 0.75);
+		final long[] ptrs = addChain(dg, tidx, n);
+		dg.prepareForReads();
+
+		final int threads = 4;
+		final java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(threads);
+		try {
+			final java.util.List<java.util.concurrent.Future<?>> futures = new java.util.ArrayList<>();
+			for (int t = 0; t < threads; t++) {
+				futures.add(pool.submit(() -> {
+					for (int k = 0; k < 100; k++) {
+						for (int i = 0; i < n; i++) {
+							assertEquals(ptrs[i], dg.getLink(i + 1L, tidx));
+						}
+					}
+					return null;
+				}));
+			}
+			for (java.util.concurrent.Future<?> f : futures) {
+				f.get();
+			}
+		} finally {
+			pool.shutdownNow();
+		}
+	}
+
+	// The SCC search overwrites the file pointers in the node ptr table with
+	// links, which makeNodePtrTblIfStale has to undo. Without links, it must
+	// not re-read the (potentially huge) ptr file.
+	@Test
+	public void testMakeNodePtrTblIfStale() throws IOException {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		final long[] ptrs = addChain(dg, tidx, 3);
+		assertFalse(dg.isNodePtrTblStale());
+
+		dg.putLink(1L, tidx, AbstractDiskGraph.MAX_PTR + 1);
+		dg.setMaxLink(2L, tidx);
+		assertTrue(dg.isNodePtrTblStale());
+
+		dg.makeNodePtrTblIfStale();
+		assertFalse(dg.isNodePtrTblStale());
+		for (int i = 0; i < ptrs.length; i++) {
+			assertEquals(ptrs[i], dg.getLink(i + 1L, tidx));
+		}
+	}
+
+	// DiskGraph#getPath marks nodes in the node ptr table.
+	@Test
+	public void testMakeNodePtrTblIfStaleAfterGetPath() throws IOException {
+		final AbstractDiskGraph dg = getDiskGraph();
+		final int tidx = getTableauIndex();
+		dg.addInitNode(1L, tidx);
+		final long[] ptrs = addChain(dg, tidx, 4);
+		dg.createCache();
+		dg.getPath(4L, tidx);
+		dg.destroyCache();
+
+		dg.makeNodePtrTblIfStale();
+		for (int i = 0; i < ptrs.length; i++) {
+			assertEquals(ptrs[i], dg.getLink(i + 1L, tidx));
+		}
+	}
+
 	// No init node makes DiskGraph#getPath never break from the while loop
 	@Test
 	public void testGetPathWithoutInitNoTableau() throws IOException {
