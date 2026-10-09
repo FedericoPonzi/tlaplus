@@ -154,6 +154,9 @@ Remove(p) ==
     /\ pc' = [pc EXCEPT ![p] = "pick"]
     /\ UNCHANGED <<sccVars, parent, owners, dead, rstack, arg, taken, stop>>
 
+\* The sets of live nodes of root r's set that a worker may pick at once.
+PickSets(r) == SUBSET live[r] \ {{}}
+
 \* pickFromList: Pops the frame if its set is dead, completes the set if it
 \* has no live nodes left, or picks some of its live nodes otherwise.
 Pick(p) ==
@@ -173,7 +176,7 @@ Pick(p) ==
             /\ pc' = [pc EXCEPT ![p] = "report"]
             /\ arg' = [arg EXCEPT ![p] = r]
             /\ UNCHANGED <<frames, rstack>>
-       ELSE \E S \in SUBSET live[r] \ {{}} :
+       ELSE \E S \in PickSets(r) :
             /\ SetTop(p, [Top(p) EXCEPT !.picked = S, !.pending = S])
             /\ pc' = [pc EXCEPT ![p] = "run"]
             /\ UNCHANGED <<dead, rstack, arg>>

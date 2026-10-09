@@ -25,6 +25,7 @@ package tlc2.tool.liveness;
 import java.io.IOException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.SplittableRandom;
 import java.util.function.Consumer;
@@ -121,6 +122,42 @@ final class UnionFindSccSearch {
 		DEAD, FOUND, SUCCESS
 	}
 
+	/**
+	 * Observes the search for trace validation against UFSCC.tla. A worker
+	 * holds the tracer's step lock from enter to exit except at yieldStep,
+	 * which makes the steps between two yields atomic.
+	 */
+	interface Tracer {
+		void enter(int worker);
+
+		void yieldStep(int worker);
+
+		void exit(int worker);
+
+		void addedRoot(Node n);
+
+		void event(int worker, String action, Object... args);
+	}
+
+	private Tracer tracer;
+
+	void setTracer(final Tracer t) {
+		this.tracer = t;
+	}
+
+	private boolean step(final int p) {
+		if (this.tracer != null) {
+			this.tracer.yieldStep(p);
+		}
+		return true;
+	}
+
+	private void trace(final int p, final String action, final Object... args) {
+		if (this.tracer != null) {
+			this.tracer.event(p, action, args);
+		}
+	}
+
 	private final int workers;
 	private final Successors successors;
 	private final SccListener listener;
@@ -182,6 +219,9 @@ final class UnionFindSccSearch {
 		}
 		synchronized (this.roots) {
 			this.roots.add(n);
+		}
+		if (this.tracer != null) {
+			this.tracer.addedRoot(n);
 		}
 	}
 
@@ -256,9 +296,12 @@ final class UnionFindSccSearch {
 			this.running++;
 		}
 		try {
+			if (this.tracer != null) {
+				this.tracer.enter(p);
+			}
 			final Worker w = new Worker(p);
 			int cursor = 0;
-			while (!this.stop) {
+			while (step(p) && !this.stop) {
 				final Node root;
 				synchronized (this.roots) {
 					if (cursor >= this.roots.size()) {
@@ -272,6 +315,9 @@ final class UnionFindSccSearch {
 			this.failure.compareAndSet(null, t);
 			this.stop = true;
 		} finally {
+			if (this.tracer != null) {
+				this.tracer.exit(p);
+			}
 			synchronized (this.lock) {
 				if (--this.running == 0) {
 					this.lock.notifyAll();
@@ -310,18 +356,23 @@ final class UnionFindSccSearch {
 		}
 
 		void search(final Node root) throws IOException {
-			if (makeClaim(root) != Claim.SUCCESS) {
+			final Claim c0 = makeClaim(root);
+			trace(this.p, "start", root, c0.name());
+			if (c0 != Claim.SUCCESS) {
 				return;
 			}
 			push(root);
 			while (!this.frames.isEmpty()) {
+				step(this.p);
 				if (stop) {
 					return;
 				}
 				final Frame f = this.frames.peek();
 				if (f.succ != null && f.i < f.succ.length) {
 					final Node w = f.succ[f.i++];
-					switch (makeClaim(w)) {
+					final Claim c = makeClaim(w);
+					trace(this.p, "claim", w, c.name());
+					switch (c) {
 					case DEAD:
 						break;
 					case SUCCESS:
@@ -335,19 +386,30 @@ final class UnionFindSccSearch {
 							if (this.rStack.isEmpty()) {
 								throw new IllegalStateException("UFSCC: " + w + " not on the stack of worker " + this.p);
 							}
+							final Node ra = find(this.rStack.peek());
+							final Node rb = find(r);
 							union(this.rStack.peek(), r);
+							if (ra == rb) {
+								trace(this.p, "same");
+							} else {
+								final Node u = find(ra);
+								trace(this.p, "merge", u, u == ra ? rb : ra);
+							}
 						}
+						trace(this.p, "united");
 						break;
 					}
 					continue;
 				}
 				if (f.next < f.picks) {
+					trace(this.p, "fetch", f.picked[f.next]);
 					f.succ = successors.of(f.picked[f.next++], UnionFindSccSearch.this);
 					f.i = 0;
 					shuffle(f.succ);
 					continue;
 				}
 				if (f.picks > 0) {
+					trace(this.p, "remove", (Object) Arrays.copyOf(f.picked, f.picks));
 					removeFromList(f.picked, f.picks);
 					f.picks = 0;
 					f.next = 0;
@@ -357,13 +419,22 @@ final class UnionFindSccSearch {
 						: f.picked.length < MAX_PICKS ? new Node[2 * f.picked.length] : f.picked;
 				final int picks = pickFromList(f.v, f.picked);
 				if (picks > 0) {
+					trace(this.p, "pick", (Object) Arrays.copyOf(f.picked, picks));
 					f.picks = picks;
 					continue;
 				}
-				if (picks == COMPLETED && report(f.v)) {
-					stopped = true;
-					stop = true;
-					return;
+				if (picks == COMPLETED) {
+					final Node r = find(f.v);
+					trace(this.p, "complete", r);
+					final boolean bad = report(f.v);
+					trace(this.p, "check", r, bad);
+					if (bad) {
+						stopped = true;
+						stop = true;
+						return;
+					}
+				} else {
+					trace(this.p, "deadset");
 				}
 				if (this.rStack.peek() == f.v) {
 					this.rStack.pop();

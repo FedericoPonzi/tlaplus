@@ -44,11 +44,12 @@ Violates(C) == C \cap Bad # {}
 \* models override these in their .cfg.
 RootSets == SUBSET Nodes \ {{}}
 BadSets == {{}} \cup {{n} : n \in Nodes}
+EdgeSets == SUBSET (Nodes \X Nodes)
 
 -----------------------------------------------------------------------------
 
 SccInit ==
-    /\ E \in SUBSET (Nodes \X Nodes)
+    /\ E \in EdgeSets
     /\ Roots \in RootSets
     /\ Bad \in BadSets
     /\ reported = {}

@@ -66,7 +66,7 @@ public class UnionFindSccSearchTest {
 	 * the SCC search; their targets become new roots instead (like edges that
 	 * violate a PEM's EAAction in LiveWorker).
 	 */
-	private static final class Graph {
+	static final class Graph {
 		final int n;
 		final List<List<Integer>> succ = new ArrayList<>();
 		final Set<Long> pruned = new HashSet<>();
@@ -189,7 +189,7 @@ public class UnionFindSccSearchTest {
 		}
 	}
 
-	private static UnionFindSccSearch.Successors successorsOf(final Graph g) {
+	static UnionFindSccSearch.Successors successorsOf(final Graph g) {
 		return (node, search) -> {
 			final int u = (int) node.fp;
 			final List<UnionFindSccSearch.Node> out = new ArrayList<>();
